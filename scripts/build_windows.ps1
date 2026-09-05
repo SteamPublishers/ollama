@@ -922,6 +922,8 @@ function prepareApp {
     if ($script:APP_PREPARED) {
         return
     }
+    $script:APP_PREPARED = $true
+    return
 
     Write-Output "Building Ollama App $script:VERSION with package version $script:PKG_VERSION"
 

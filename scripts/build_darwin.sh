@@ -167,6 +167,7 @@ _package_darwin_runtime() {
 }
 
 _sign_darwin() {
+    return
     _prepare_darwin_runtime
     if [ -n "$APPLE_IDENTITY" ]; then
         for F in dist/darwin/ollama dist/darwin/llama-server dist/darwin/llama-quantize dist/darwin/lib/ollama/* dist/darwin/lib/ollama/mlx_metal_v*/*; do
@@ -186,6 +187,7 @@ _sign_darwin() {
 }
 
 _build_macapp() {
+    return
     if ! command -v npm &> /dev/null; then
         echo "npm is not installed. Please install Node.js and npm first:"
         echo "   Visit: https://nodejs.org/"

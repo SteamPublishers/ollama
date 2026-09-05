@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 
@@ -10,8 +9,6 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cmd/launch"
-	"github.com/ollama/ollama/internal/modelref"
-	"github.com/ollama/ollama/types/model"
 )
 
 // for testing
@@ -37,43 +34,43 @@ func isPullNotFoundErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), pullModelNotFoundMessage)
 }
 
-// cloudSuggestionCandidate reports whether a failed pull of name should
-// trigger a ":cloud" suggestion, and if so returns the cloud model name to
-// suggest. It only applies to default-tag lookups (e.g. "kimi-k3") against
-// the default registry whose pull failed because the tag doesn't exist.
-func cloudSuggestionCandidate(name string, pullErr error, insecure bool) (string, bool) {
-	if !isPullNotFoundErr(pullErr) {
-		return "", false
-	}
-	return cloudSuggestionName(name, insecure)
-}
+// // cloudSuggestionCandidate reports whether a failed pull of name should
+// // trigger a ":cloud" suggestion, and if so returns the cloud model name to
+// // suggest. It only applies to default-tag lookups (e.g. "kimi-k3") against
+// // the default registry whose pull failed because the tag doesn't exist.
+// func cloudSuggestionCandidate(name string, pullErr error, insecure bool) (string, bool) {
+// 	if !isPullNotFoundErr(pullErr) {
+// 		return "", false
+// 	}
+// 	return cloudSuggestionName(name, insecure)
+// }
 
-// cloudSuggestionName applies the name-based eligibility checks for the
-// ":cloud" suggestion, returning the cloud model name to suggest.
-func cloudSuggestionName(name string, insecure bool) (string, bool) {
-	// --insecure implies a non-default registry, where an ollama.com cloud
-	// model wouldn't be a meaningful suggestion.
-	if insecure {
-		return "", false
-	}
+// // cloudSuggestionName applies the name-based eligibility checks for the
+// // ":cloud" suggestion, returning the cloud model name to suggest.
+// func cloudSuggestionName(name string, insecure bool) (string, bool) {
+// 	// --insecure implies a non-default registry, where an ollama.com cloud
+// 	// model wouldn't be a meaningful suggestion.
+// 	if insecure {
+// 		return "", false
+// 	}
 
-	ref, err := modelref.ParseRef(name)
-	if err != nil || ref.Source != modelref.ModelSourceUnspecified {
-		return "", false
-	}
+// 	ref, err := modelref.ParseRef(name)
+// 	if err != nil || ref.Source != modelref.ModelSourceUnspecified {
+// 		return "", false
+// 	}
 
-	if modelref.HasExplicitTag(ref.Base) {
-		return "", false
-	}
+// 	if modelref.HasExplicitTag(ref.Base) {
+// 		return "", false
+// 	}
 
-	// Only default-registry names qualify: the existence probe forwards the name
-	// to ollama.com, and custom-registry model names shouldn't be sent there.
-	if n := model.ParseName(ref.Base); !n.IsValid() || !strings.EqualFold(n.Host, model.DefaultName().Host) {
-		return "", false
-	}
+// 	// Only default-registry names qualify: the existence probe forwards the name
+// 	// to ollama.com, and custom-registry model names shouldn't be sent there.
+// 	if n := model.ParseName(ref.Base); !n.IsValid() || !strings.EqualFold(n.Host, model.DefaultName().Host) {
+// 		return "", false
+// 	}
 
-	return ref.Base + ":cloud", true
-}
+// 	return ref.Base + ":cloud", true
+// }
 
 // pullWithCloudSuggestion pulls `name`, and if the model's default tag
 // doesn't exist but a ":cloud" tag does, offers it: either interactively via
@@ -84,38 +81,40 @@ func pullWithCloudSuggestion(ctx context.Context, client *api.Client, name strin
 	// If a suggestion prompt may follow a failed pull, erase the failed
 	// attempt's progress display instead of leaving its "pulling manifest"
 	// line to stack up against the accepted pull's identical one.
-	_, eligible := cloudSuggestionName(name, insecure)
-	clearNotFound := eligible && isInteractiveTerminal()
+	// _, eligible := cloudSuggestionName(name, insecure)
+	// clearNotFound := eligible && isInteractiveTerminal()
 
-	pullErr := pullModelWithProgress(ctx, client, name, insecure, clearNotFound)
+	pullErr := pullModelWithProgress(ctx, client, name, insecure, true)
 	if pullErr == nil {
 		return name, nil
 	}
 
-	cloudName, ok := cloudSuggestionCandidate(name, pullErr, insecure)
-	if !ok || ctx.Err() != nil {
-		return "", pullErr
-	}
+	return "", pullErr
 
-	// Showing a ":cloud" model is proxied to ollama.com and mirrors its status,
-	// so this reliably answers "does a cloud version exist?". Any error (no
-	// cloud tag, cloud disabled, older server, offline) means no suggestion.
-	if _, err := client.Show(ctx, &api.ShowRequest{Model: cloudName}); err != nil {
-		return "", pullErr
-	}
+	// cloudName, ok := cloudSuggestionCandidate(name, pullErr, insecure)
+	// if !ok || ctx.Err() != nil {
+	// 	return "", pullErr
+	// }
 
-	if !isInteractiveTerminal() {
-		return "", fmt.Errorf("%w\n\n%q is available as a cloud model. Try:\n  ollama %s %s", pullErr, cloudName, verb, cloudName)
-	}
+	// // Showing a ":cloud" model is proxied to ollama.com and mirrors its status,
+	// // so this reliably answers "does a cloud version exist?". Any error (no
+	// // cloud tag, cloud disabled, older server, offline) means no suggestion.
+	// if _, err := client.Show(ctx, &api.ShowRequest{Model: cloudName}); err != nil {
+	// 	return "", pullErr
+	// }
 
-	accepted, err := confirmCloudSuggestion(fmt.Sprintf("Did you mean %q?", cloudName))
-	if err != nil || !accepted {
-		// Declining or cancelling falls back to the original error.
-		return "", pullErr
-	}
+	// if !isInteractiveTerminal() {
+	// 	return "", fmt.Errorf("%w\n\n%q is available as a cloud model. Try:\n  ollama %s %s", pullErr, cloudName, verb, cloudName)
+	// }
 
-	if err := pullModelWithProgress(ctx, client, cloudName, insecure, false); err != nil {
-		return "", err
-	}
-	return cloudName, nil
+	// accepted, err := confirmCloudSuggestion(fmt.Sprintf("Did you mean %q?", cloudName))
+	// if err != nil || !accepted {
+	// 	// Declining or cancelling falls back to the original error.
+	// 	return "", pullErr
+	// }
+
+	// if err := pullModelWithProgress(ctx, client, cloudName, insecure, false); err != nil {
+	// 	return "", err
+	// }
+	// return cloudName, nil
 }
