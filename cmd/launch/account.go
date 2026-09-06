@@ -3,9 +3,7 @@ package launch
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -13,9 +11,6 @@ import (
 )
 
 const (
-	// DefaultUpgradeURL is the fixed destination for subscription upgrades.
-	DefaultUpgradeURL = "https://ollama.com/upgrade"
-
 	accountCheckTimeout = 3 * time.Second
 )
 
@@ -290,70 +285,7 @@ func (c *launcherClient) modelRecommendationItem(ctx context.Context, model stri
 }
 
 func (c *launcherClient) runUpgradeFlow(ctx context.Context, item ModelItem) error {
-	if DefaultUpgrade != nil {
-		if _, err := DefaultUpgrade(item.Name, item.RequiredPlan); err != nil {
-			if errors.Is(err, ErrCancelled) {
-				return errUpgradeCancelled
-			}
-			return err
-		}
-		return nil
-	}
-
-	yes, err := ConfirmPrompt(fmt.Sprintf("Upgrade to use %s?", item.Name))
-	if errors.Is(err, ErrCancelled) {
-		return errUpgradeCancelled
-	}
-	if err != nil {
-		return err
-	}
-	if !yes {
-		return errUpgradeCancelled
-	}
-
-	fmt.Fprintf(os.Stderr, "\nTo upgrade, navigate to:\n    %s\n\n", DefaultUpgradeURL)
-	openNow, err := ConfirmPrompt("Open now?")
-	if errors.Is(err, ErrCancelled) {
-		return errUpgradeCancelled
-	}
-	if err != nil {
-		return err
-	}
-	if openNow {
-		OpenBrowser(DefaultUpgradeURL)
-	} else {
-		return errUpgradeCancelled
-	}
-
-	spinnerFrames := []string{"|", "/", "-", "\\"}
-	frame := 0
-	fmt.Fprintf(os.Stderr, "\033[90mwaiting for upgrade to complete... %s\033[0m", spinnerFrames[0])
-
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Fprintf(os.Stderr, "\r\033[K")
-			return ctx.Err()
-		case <-ticker.C:
-			frame++
-			fmt.Fprintf(os.Stderr, "\r\033[90mwaiting for upgrade to complete... %s\033[0m", spinnerFrames[frame%len(spinnerFrames)])
-			if frame%10 != 0 {
-				continue
-			}
-			state := launchAccountState(ctx, c.apiClient)
-			if state.Status == accountStateUnknown {
-				fmt.Fprintf(os.Stderr, "\r\033[K")
-				return ErrPlanVerificationUnavailable
-			}
-			if state.Status == accountStateSignedIn && PlanSatisfies(state.Plan, item.RequiredPlan) {
-				fmt.Fprintf(os.Stderr, "\r\033[K\033[A\r\033[K\033[1mplan updated\033[0m\n")
-				return nil
-			}
-		}
-	}
+	return nil
 }
 
 // PlanSatisfies reports whether currentPlan can use a model that has a requiredPlan.

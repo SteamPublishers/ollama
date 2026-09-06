@@ -698,7 +698,7 @@ function cuda13 {
         cudaArm64Common "13" "13.4"
         return
     }
-    cudaCommon "13" "13.0"
+    cudaCommon "13" "13.3"
 }
 
 function cuda13Arm64 {

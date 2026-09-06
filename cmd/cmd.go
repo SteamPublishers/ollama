@@ -31,10 +31,8 @@ import (
 	"github.com/containerd/console"
 	"github.com/mattn/go-runewidth"
 	"github.com/olekukonko/tablewriter"
-	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 
 	"github.com/ollama/ollama/api"
@@ -45,16 +43,13 @@ import (
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/internal/modelref"
 	"github.com/ollama/ollama/logutil"
-	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/progress"
 	"github.com/ollama/ollama/readline"
 	"github.com/ollama/ollama/runner"
 	"github.com/ollama/ollama/server"
 	"github.com/ollama/ollama/types/model"
-	"github.com/ollama/ollama/types/syncmap"
 	"github.com/ollama/ollama/version"
 	xcreate "github.com/ollama/ollama/x/create"
-	xcreateclient "github.com/ollama/ollama/x/create/client"
 )
 
 func init() {
@@ -215,212 +210,6 @@ func resolveExperimentalDraftDir(ref, filename string) (string, error) {
 	}
 
 	return "", fmt.Errorf("DRAFT model references are not supported with --experimental yet: %s", ref)
-}
-
-func CreateHandler(cmd *cobra.Command, args []string) error {
-	p := progress.NewProgress(os.Stderr)
-	defer p.Stop()
-
-	// Validate model name early to fail fast
-	modelName := args[0]
-	name := model.ParseName(modelName)
-	if !name.IsValid() {
-		return fmt.Errorf("invalid model name: %s", modelName)
-	}
-
-	// Check for --experimental flag for safetensors model creation.
-	experimental, _ := cmd.Flags().GetBool("experimental")
-	draftQuantize, _ := cmd.Flags().GetString("draft-quantize")
-	if experimental {
-		if !isLocalhost() {
-			return errors.New("remote safetensor model creation not yet supported")
-		}
-
-		// Get Modelfile content - either from -f flag or default to "FROM ."
-		var reader io.Reader
-		filename, err := getModelfileName(cmd)
-		if os.IsNotExist(err) || filename == "" {
-			// No Modelfile specified or found - use default
-			reader = strings.NewReader("FROM .\n")
-		} else if err != nil {
-			return err
-		} else {
-			f, err := os.Open(filename)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			reader = f
-		}
-
-		// Parse the Modelfile
-		modelfile, err := parser.ParseFile(reader)
-		if err != nil {
-			return fmt.Errorf("failed to parse Modelfile: %w", err)
-		}
-
-		modelDir, mfConfig, err := xcreateclient.ConfigFromModelfile(modelfile)
-		if err != nil {
-			return err
-		}
-
-		modelDir = resolveExperimentalLocalModelDir(modelDir, filename)
-		if mfConfig.Draft != "" {
-			draftDir, err := resolveExperimentalDraftDir(mfConfig.Draft, filename)
-			if err != nil {
-				return err
-			}
-			mfConfig.Draft = draftDir
-		}
-
-		quantize, _ := cmd.Flags().GetString("quantize")
-		return xcreateclient.CreateModel(xcreateclient.CreateOptions{
-			ModelName:     modelName,
-			ModelDir:      modelDir,
-			Quantize:      quantize,
-			DraftQuantize: draftQuantize,
-			Modelfile:     mfConfig,
-		}, p)
-	}
-
-	// Standard Modelfile + API path
-	var reader io.Reader
-
-	filename, err := getModelfileName(cmd)
-	if os.IsNotExist(err) {
-		if filename == "" {
-			reader = strings.NewReader("FROM .\n")
-		} else {
-			return errModelfileNotFound
-		}
-	} else if err != nil {
-		return err
-	} else {
-		f, err := os.Open(filename)
-		if err != nil {
-			return err
-		}
-
-		reader = f
-		defer f.Close()
-	}
-
-	modelfile, err := parser.ParseFile(reader)
-	if err != nil {
-		return err
-	}
-
-	status := "gathering model components"
-	spinner := progress.NewSpinner(status)
-	p.Add(status, spinner)
-
-	req, err := modelfile.CreateRequest(filepath.Dir(filename))
-	if err != nil {
-		return err
-	}
-	spinner.Stop()
-
-	req.Model = modelName
-	quantize, _ := cmd.Flags().GetString("quantize")
-	if quantize != "" {
-		req.Quantize = quantize
-	}
-	if draftQuantize != "" {
-		if len(req.DraftFiles) == 0 {
-			return errors.New("--draft-quantize requires a DRAFT model")
-		}
-		req.DraftQuantize = draftQuantize
-	}
-
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return err
-	}
-
-	var g errgroup.Group
-	g.SetLimit(max(runtime.GOMAXPROCS(0)-1, 1))
-
-	files := syncmap.NewSyncMap[string, string]()
-	fileNames := createRequestFileNames(req.Files)
-	for f, digest := range req.Files {
-		g.Go(func() error {
-			if _, err := createBlob(cmd, client, f, digest, p); err != nil {
-				return err
-			}
-
-			files.Store(fileNames[f], digest)
-			return nil
-		})
-	}
-
-	adapters := syncmap.NewSyncMap[string, string]()
-	adapterNames := createRequestFileNames(req.Adapters)
-	for f, digest := range req.Adapters {
-		g.Go(func() error {
-			if _, err := createBlob(cmd, client, f, digest, p); err != nil {
-				return err
-			}
-
-			adapters.Store(adapterNames[f], digest)
-			return nil
-		})
-	}
-
-	draftFiles := syncmap.NewSyncMap[string, string]()
-	draftFileNames := createRequestFileNames(req.DraftFiles)
-	for f, digest := range req.DraftFiles {
-		g.Go(func() error {
-			if _, err := createBlob(cmd, client, f, digest, p); err != nil {
-				return err
-			}
-
-			draftFiles.Store(draftFileNames[f], digest)
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		return err
-	}
-
-	req.Files = files.Items()
-	req.Adapters = adapters.Items()
-	req.DraftFiles = draftFiles.Items()
-
-	bars := make(map[string]*progress.Bar)
-	fn := func(resp api.ProgressResponse) error {
-		if resp.Digest != "" {
-			bar, ok := bars[resp.Digest]
-			if !ok {
-				msg := resp.Status
-				if msg == "" {
-					msg = fmt.Sprintf("pulling %s...", resp.Digest[7:19])
-				}
-				bar = progress.NewBar(msg, resp.Total, resp.Completed)
-				bars[resp.Digest] = bar
-				p.Add(resp.Digest, bar)
-			}
-
-			bar.Set(resp.Completed)
-		} else if status != resp.Status {
-			spinner.Stop()
-
-			status = resp.Status
-			spinner = progress.NewSpinner(status)
-			p.Add(status, spinner)
-		}
-
-		return nil
-	}
-
-	if err := client.Create(cmd.Context(), req, fn); err != nil {
-		if strings.Contains(err.Error(), "path or Modelfile are required") {
-			return fmt.Errorf("the ollama server must be updated to use `ollama create` with this client")
-		}
-		return err
-	}
-
-	return nil
 }
 
 func createRequestFileNames(files map[string]string) map[string]string {
@@ -929,154 +718,6 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		}
 		return err
 	}
-	return nil
-}
-
-func SigninHandler(cmd *cobra.Command, args []string) error {
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return err
-	}
-
-	user, err := client.Whoami(cmd.Context())
-	if err != nil {
-		var aErr api.AuthorizationError
-		if errors.As(err, &aErr) && aErr.StatusCode == http.StatusUnauthorized {
-			fmt.Println("You need to be signed in to Ollama to run Cloud models.")
-			fmt.Println()
-
-			if aErr.SigninURL != "" {
-				_ = browser.OpenURL(aErr.SigninURL)
-				fmt.Printf(ConnectInstructions, aErr.SigninURL)
-			}
-			return nil
-		}
-		return err
-	}
-
-	if user != nil && user.Name != "" {
-		fmt.Printf("You are already signed in as user '%s'\n", user.Name)
-		fmt.Println()
-		return nil
-	}
-
-	return nil
-}
-
-func SignoutHandler(cmd *cobra.Command, args []string) error {
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return err
-	}
-
-	err = client.Signout(cmd.Context())
-	if err != nil {
-		var aErr api.AuthorizationError
-		if errors.As(err, &aErr) && aErr.StatusCode == http.StatusUnauthorized {
-			fmt.Println("You are not signed in to ollama.com")
-			fmt.Println()
-			return nil
-		} else {
-			return err
-		}
-	}
-
-	fmt.Println("You have signed out of ollama.com")
-	fmt.Println()
-	return nil
-}
-
-func PushHandler(cmd *cobra.Command, args []string) error {
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return err
-	}
-
-	insecure, err := cmd.Flags().GetBool("insecure")
-	if err != nil {
-		return err
-	}
-
-	n := model.ParseName(args[0])
-	if strings.HasSuffix(n.Host, ".ollama.ai") || strings.HasSuffix(n.Host, ".ollama.com") {
-		_, err := client.Whoami(cmd.Context())
-		if err != nil {
-			var aErr api.AuthorizationError
-			if errors.As(err, &aErr) && aErr.StatusCode == http.StatusUnauthorized {
-				fmt.Println("You need to be signed in to push models to ollama.com.")
-				fmt.Println()
-
-				if aErr.SigninURL != "" {
-					fmt.Printf(ConnectInstructions, aErr.SigninURL)
-				}
-				return nil
-			}
-
-			return err
-		}
-	}
-
-	p := progress.NewProgress(os.Stderr)
-	defer p.Stop()
-
-	bars := make(map[string]*progress.Bar)
-	var status string
-	var spinner *progress.Spinner
-
-	fn := func(resp api.ProgressResponse) error {
-		if resp.Digest != "" {
-			if spinner != nil {
-				spinner.Stop()
-			}
-
-			bar, ok := bars[resp.Digest]
-			if !ok {
-				msg := resp.Status
-				if msg == "" {
-					msg = fmt.Sprintf("pushing %s...", resp.Digest[7:19])
-				}
-				bar = progress.NewBar(msg, resp.Total, resp.Completed)
-				bars[resp.Digest] = bar
-				p.Add(resp.Digest, bar)
-			}
-
-			bar.Set(resp.Completed)
-		} else if status != resp.Status {
-			if spinner != nil {
-				spinner.Stop()
-			}
-
-			status = resp.Status
-			spinner = progress.NewSpinner(status)
-			p.Add(status, spinner)
-		}
-
-		return nil
-	}
-
-	request := api.PushRequest{Name: args[0], Insecure: insecure}
-
-	if err := client.Push(cmd.Context(), &request, fn); err != nil {
-		if spinner != nil {
-			spinner.Stop()
-		}
-		errStr := strings.ToLower(err.Error())
-		if strings.Contains(errStr, "access denied") || strings.Contains(errStr, "unauthorized") {
-			return errors.New("you are not authorized to push to this namespace, create the model under a namespace you own")
-		}
-		return err
-	}
-
-	p.Stop()
-	spinner.Stop()
-
-	destination := n.String()
-	if strings.HasSuffix(n.Host, ".ollama.ai") || strings.HasSuffix(n.Host, ".ollama.com") {
-		destination = "https://ollama.com/" + strings.TrimSuffix(n.DisplayShortest(), ":latest")
-	}
-	fmt.Printf("\nYou can find your model at:\n\n")
-	fmt.Printf("\t%s\n", destination)
-
 	return nil
 }
 
@@ -2126,12 +1767,11 @@ Environment Variables:
 	cmd.SetUsageTemplate(cmd.UsageTemplate() + envUsage)
 }
 
-
 type launcherDeps struct {
-	buildState          func(context.Context) (*launch.LauncherState, error)
-	resolveRunModel     func(context.Context, launch.RunModelRequest) (string, error)
-	launchIntegration   func(context.Context, launch.IntegrationLaunchRequest) error
-	runModel            func(*cobra.Command, string) error
+	buildState        func(context.Context) (*launch.LauncherState, error)
+	resolveRunModel   func(context.Context, launch.RunModelRequest) (string, error)
+	launchIntegration func(context.Context, launch.IntegrationLaunchRequest) error
+	runModel          func(*cobra.Command, string) error
 }
 
 // func runInteractiveTUIStep(cmd *cobra.Command, deps launcherDeps) (bool, error) {
@@ -2241,25 +1881,6 @@ func NewCLI() *cobra.Command {
 	rootCmd.Flags().Bool("verbose", false, "Show timings for response")
 	rootCmd.Flags().Bool("nowordwrap", false, "Don't wrap words to the next line automatically")
 
-	createCmd := &cobra.Command{
-		Use:   "create MODEL",
-		Short: "Create a model",
-		Args:  cobra.ExactArgs(1),
-		PreRunE: func(cmd *cobra.Command, args []string) error {
-			// Skip server check for experimental mode (writes directly to disk)
-			if experimental, _ := cmd.Flags().GetBool("experimental"); experimental {
-				return nil
-			}
-			return checkServerHeartbeat(cmd, args)
-		},
-		RunE: CreateHandler,
-	}
-
-	createCmd.Flags().StringP("file", "f", "", "Name of the Modelfile (default \"Modelfile\")")
-	createCmd.Flags().StringP("quantize", "q", "", "Quantize model to this level (e.g. q4_K_M)")
-	createCmd.Flags().String("draft-quantize", "", "Quantize draft model to this level")
-	createCmd.Flags().Bool("experimental", false, "Enable experimental safetensors model creation")
-
 	showCmd := &cobra.Command{
 		Use:     "show MODEL",
 		Short:   "Show information for a model",
@@ -2320,50 +1941,6 @@ func NewCLI() *cobra.Command {
 
 	pullCmd.Flags().Bool("insecure", false, "Use an insecure registry")
 
-	pushCmd := &cobra.Command{
-		Use:     "push MODEL",
-		Short:   "Push a model to a registry",
-		Args:    cobra.ExactArgs(1),
-		PreRunE: checkServerHeartbeat,
-		RunE:    PushHandler,
-	}
-
-	pushCmd.Flags().Bool("insecure", false, "Use an insecure registry")
-
-	signinCmd := &cobra.Command{
-		Use:     "signin",
-		Short:   "Sign in to ollama.com",
-		Args:    cobra.ExactArgs(0),
-		PreRunE: checkServerHeartbeat,
-		RunE:    SigninHandler,
-	}
-
-	loginCmd := &cobra.Command{
-		Use:     "login",
-		Short:   "Sign in to ollama.com",
-		Hidden:  true,
-		Args:    cobra.ExactArgs(0),
-		PreRunE: checkServerHeartbeat,
-		RunE:    SigninHandler,
-	}
-
-	signoutCmd := &cobra.Command{
-		Use:     "signout",
-		Short:   "Sign out from ollama.com",
-		Args:    cobra.ExactArgs(0),
-		PreRunE: checkServerHeartbeat,
-		RunE:    SignoutHandler,
-	}
-
-	logoutCmd := &cobra.Command{
-		Use:     "logout",
-		Short:   "Sign out from ollama.com",
-		Hidden:  true,
-		Args:    cobra.ExactArgs(0),
-		PreRunE: checkServerHeartbeat,
-		RunE:    SignoutHandler,
-	}
-
 	listCmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
@@ -2421,12 +1998,10 @@ func NewCLI() *cobra.Command {
 	envs := []envconfig.EnvVar{envVars["OLLAMA_HOST"]}
 
 	for _, cmd := range []*cobra.Command{
-		createCmd,
 		showCmd,
 		runCmd,
 		stopCmd,
 		pullCmd,
-		pushCmd,
 		listCmd,
 		psCmd,
 		copyCmd,
@@ -2467,16 +2042,10 @@ func NewCLI() *cobra.Command {
 
 	rootCmd.AddCommand(
 		serveCmd,
-		createCmd,
 		showCmd,
 		runCmd,
 		stopCmd,
 		pullCmd,
-		pushCmd,
-		signinCmd,
-		loginCmd,
-		signoutCmd,
-		logoutCmd,
 		listCmd,
 		psCmd,
 		copyCmd,
