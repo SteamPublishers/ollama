@@ -31,19 +31,21 @@ func newInferenceRequestLogger() (*inferenceRequestLogger, error) {
 }
 
 func (s *Server) initRequestLogging() error {
-	if !envconfig.DebugLogRequests() {
-		return nil
-	}
-
-	requestLogger, err := newInferenceRequestLogger()
-	if err != nil {
-		return fmt.Errorf("enable OLLAMA_DEBUG_LOG_REQUESTS: %w", err)
-	}
-
-	s.requestLogger = requestLogger
-	slog.Info(fmt.Sprintf("request debug logging enabled; inference request logs will be stored in %s and include request bodies and replay curl commands", requestLogger.dir))
-
 	return nil
+
+	// if !envconfig.DebugLogRequests() {
+	// 	return nil
+	// }
+
+	// requestLogger, err := newInferenceRequestLogger()
+	// if err != nil {
+	// 	return fmt.Errorf("enable OLLAMA_DEBUG_LOG_REQUESTS: %w", err)
+	// }
+
+	// s.requestLogger = requestLogger
+	// slog.Info(fmt.Sprintf("request debug logging enabled; inference request logs will be stored in %s and include request bodies and replay curl commands", requestLogger.dir))
+
+	// return nil
 }
 
 func (s *Server) withInferenceRequestLogging(route string, handlers ...gin.HandlerFunc) []gin.HandlerFunc {

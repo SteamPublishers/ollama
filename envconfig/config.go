@@ -165,12 +165,6 @@ func LoadTimeout() (loadTimeout time.Duration) {
 
 func Remotes() []string {
 	var r []string
-	raw := strings.TrimSpace(Var("OLLAMA_REMOTES"))
-	if raw == "" {
-		r = []string{"ollama.com"}
-	} else {
-		r = strings.Split(raw, ",")
-	}
 	return r
 }
 
@@ -199,16 +193,17 @@ func Bool(k string) func() bool {
 // LogLevel returns the log level for the application.
 // Values are 0 or false INFO (Default), 1 or true DEBUG, 2 TRACE
 func LogLevel() slog.Level {
-	level := slog.LevelInfo
-	if s := Var("OLLAMA_DEBUG"); s != "" {
-		if b, _ := strconv.ParseBool(s); b {
-			level = slog.LevelDebug
-		} else if i, _ := strconv.ParseInt(s, 10, 64); i != 0 {
-			level = slog.Level(i * -4)
-		}
-	}
+	return slog.LevelError
+	// level := slog.LevelInfo
+	// if s := Var("OLLAMA_DEBUG"); s != "" {
+	// 	if b, _ := strconv.ParseBool(s); b {
+	// 		level = slog.LevelDebug
+	// 	} else if i, _ := strconv.ParseInt(s, 10, 64); i != 0 {
+	// 		level = slog.Level(i * -4)
+	// 	}
+	// }
 
-	return level
+	// return level
 }
 
 var (
@@ -216,14 +211,8 @@ var (
 	FlashAttention = BoolWithDefault("OLLAMA_FLASH_ATTENTION")
 	// GoTemplate enables Modelfile TEMPLATE rendering when a model has one.
 	GoTemplate = BoolWithDefault("OLLAMA_GO_TEMPLATE")
-	// DebugLogRequests logs inference requests to disk for replay/debugging.
-	DebugLogRequests = Bool("OLLAMA_DEBUG_LOG_REQUESTS")
 	// KvCacheType is the quantization type for the K/V cache.
 	KvCacheType = String("OLLAMA_KV_CACHE_TYPE")
-	// NoHistory disables readline history.
-	NoHistory = Bool("OLLAMA_NOHISTORY")
-	// NoPrune disables pruning of model blobs on startup.
-	NoPrune = Bool("OLLAMA_NOPRUNE")
 	// SchedSpread allows scheduling models across all GPUs.
 	SchedSpread = Bool("OLLAMA_SCHED_SPREAD")
 	// ContextLength sets the default context length
@@ -234,8 +223,6 @@ var (
 	EnableVulkan = BoolWithDefault("OLLAMA_VULKAN")
 	// EnableIntegratedGPU controls whether integrated GPUs may be selected.
 	EnableIntegratedGPU = BoolWithDefault("OLLAMA_IGPU_ENABLE")
-	// NoCloudEnv checks the OLLAMA_NO_CLOUD environment variable.
-	NoCloudEnv = Bool("OLLAMA_NO_CLOUD")
 )
 
 func String(s string) func() string {
@@ -246,7 +233,6 @@ func String(s string) func() string {
 
 var (
 	LLMLibrary = String("OLLAMA_LLM_LIBRARY")
-	Editor     = String("OLLAMA_EDITOR")
 
 	CudaVisibleDevices    = String("CUDA_VISIBLE_DEVICES")
 	HipVisibleDevices     = String("HIP_VISIBLE_DEVICES")
@@ -310,8 +296,6 @@ type EnvVar struct {
 
 func AsMap() map[string]EnvVar {
 	ret := map[string]EnvVar{
-		"OLLAMA_DEBUG":                {"OLLAMA_DEBUG", LogLevel(), "Show additional debug information (e.g. OLLAMA_DEBUG=1)"},
-		"OLLAMA_DEBUG_LOG_REQUESTS":   {"OLLAMA_DEBUG_LOG_REQUESTS", DebugLogRequests(), "Log inference request bodies and replay curl commands to a temp directory"},
 		"OLLAMA_GO_TEMPLATE":          {"OLLAMA_GO_TEMPLATE", GoTemplate(true), "Enable Modelfile TEMPLATE based rendering when available"},
 		"OLLAMA_FLASH_ATTENTION":      {"OLLAMA_FLASH_ATTENTION", FlashAttention(false), "Enabled flash attention"},
 		"OLLAMA_KV_CACHE_TYPE":        {"OLLAMA_KV_CACHE_TYPE", KvCacheType(), "Quantization type for the K/V cache (default: f16)"},
@@ -327,15 +311,10 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_MAX_TRANSFER_STREAMS": {"OLLAMA_MAX_TRANSFER_STREAMS", MaxTransferStreams(), "Maximum parallel transfer streams for safetensors model pulls/pushes (default 4)"},
 		"OLLAMA_MAX_QUEUE":            {"OLLAMA_MAX_QUEUE", MaxQueue(), "Maximum number of queued requests"},
 		"OLLAMA_MODELS":               {"OLLAMA_MODELS", Models(), "The path to the models directory"},
-		"OLLAMA_NO_CLOUD":             {"OLLAMA_NO_CLOUD", NoCloud(), "Disable Ollama cloud features (remote inference and web search)"},
-		"OLLAMA_NOHISTORY":            {"OLLAMA_NOHISTORY", NoHistory(), "Do not preserve readline history"},
-		"OLLAMA_NOPRUNE":              {"OLLAMA_NOPRUNE", NoPrune(), "Do not prune model blobs on startup"},
 		"OLLAMA_NUM_PARALLEL":         {"OLLAMA_NUM_PARALLEL", NumParallel(), "Maximum number of parallel requests"},
 		"OLLAMA_ORIGINS":              {"OLLAMA_ORIGINS", AllowedOrigins(), "A comma separated list of allowed origins"},
 		"OLLAMA_SCHED_SPREAD":         {"OLLAMA_SCHED_SPREAD", SchedSpread(), "Always schedule model across all GPUs"},
 		"OLLAMA_CONTEXT_LENGTH":       {"OLLAMA_CONTEXT_LENGTH", ContextLength(), "Context length to use unless otherwise specified (default: 4k/32k/256k based on VRAM)"},
-		"OLLAMA_EDITOR":               {"OLLAMA_EDITOR", Editor(), "Path to editor for interactive prompt editing (Ctrl+G)"},
-		"OLLAMA_REMOTES":              {"OLLAMA_REMOTES", Remotes(), "Allowed hosts for remote models (default \"ollama.com\")"},
 
 		// Informational
 		"HTTP_PROXY":  {"HTTP_PROXY", String("HTTP_PROXY")(), "HTTP proxy"},
@@ -432,34 +411,4 @@ func ReloadServerConfig() {
 	serverCfgMu.Unlock()
 
 	loadServerConfig()
-}
-
-// NoCloud returns true if Ollama cloud features are disabled,
-// checking both the OLLAMA_NO_CLOUD environment variable and
-// the disable_ollama_cloud field in ~/.ollama/server.json.
-func NoCloud() bool {
-	if NoCloudEnv() {
-		return true
-	}
-	loadServerConfig()
-	return cachedServerConfig().DisableOllamaCloud
-}
-
-// NoCloudSource returns the source of the cloud-disabled decision.
-// Returns "none", "env", "config", or "both".
-func NoCloudSource() string {
-	envDisabled := NoCloudEnv()
-	loadServerConfig()
-	configDisabled := cachedServerConfig().DisableOllamaCloud
-
-	switch {
-	case envDisabled && configDisabled:
-		return "both"
-	case envDisabled:
-		return "env"
-	case configDisabled:
-		return "config"
-	default:
-		return "none"
-	}
 }

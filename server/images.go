@@ -1150,7 +1150,7 @@ func PullModel(ctx context.Context, name string, regOpts *registryOptions, fn fu
 
 	slog.Debug("manifest written", "path", fp, "sha256", fmt.Sprintf("%x", sha256.Sum256(manifestData)), "size", len(manifestData))
 
-	if !envconfig.NoPrune() && len(deleteMap) > 0 {
+	if len(deleteMap) > 0 {
 		fn(api.ProgressResponse{Status: "removing unused layers"})
 		if err := deleteUnusedLayers(deleteMap); err != nil {
 			fn(api.ProgressResponse{Status: fmt.Sprintf("couldn't remove unused layers: %v", err)})

@@ -1973,7 +1973,7 @@ func Serve(ln net.Listener) error {
 		return err
 	}
 
-	if !envconfig.NoPrune() {
+	if true {
 		if _, err := manifest.Manifests(false); err != nil {
 			slog.Warn("corrupt manifests detected, skipping prune operation.  Re-pull or delete to clear", "error", err)
 		} else {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/api"
-	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 )
 
@@ -186,50 +184,7 @@ func (c *modelRecommendationsCache) run(ctx context.Context) {
 }
 
 func (c *modelRecommendationsCache) refresh(ctx context.Context) error {
-	if envconfig.NoCloud() {
-		return errModelRecommendationsNoCloud
-	}
-	slog.Debug("refreshing model recommendations from remote", "url", modelRecommendationsURL)
-
-	reqCtx, cancel := context.WithTimeout(ctx, modelRecommendationsFetchTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, modelRecommendationsURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	if err := cloudProxySignRequest(reqCtx, req); err != nil {
-		return fmt.Errorf("sign model recommendations request: %w", err)
-	}
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var payload api.ModelRecommendationsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return err
-	}
-
-	recs, err := validateModelRecommendations(payload.Recommendations)
-	if err != nil {
-		return err
-	}
-
-	c.set(recs)
-	slog.Debug("model recommendations refreshed", "count", len(recs))
-	if err := c.persistSnapshot(recs); err != nil {
-		slog.Warn("failed to persist model recommendations snapshot", "error", err)
-	}
-	return nil
+	return errModelRecommendationsNoCloud
 }
 
 func (c *modelRecommendationsCache) loadSnapshot() {

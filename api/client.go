@@ -116,7 +116,7 @@ func (c *Client) do(ctx context.Context, method, path string, reqData, respData 
 	requestURL := c.base.JoinPath(path)
 
 	var token string
-	if envconfig.UseAuth() || c.base.Hostname() == "ollama.com" {
+	if envconfig.UseAuth() {
 		now := strconv.FormatInt(time.Now().Unix(), 10)
 		chal := fmt.Sprintf("%s,%s?ts=%s", method, path, now)
 		token, err = getAuthorizationToken(ctx, chal)
@@ -181,7 +181,7 @@ func (c *Client) stream(ctx context.Context, method, path string, data any, fn f
 	requestURL := c.base.JoinPath(path)
 
 	var token string
-	if envconfig.UseAuth() || c.base.Hostname() == "ollama.com" {
+	if envconfig.UseAuth() {
 		var err error
 		now := strconv.FormatInt(time.Now().Unix(), 10)
 		chal := fmt.Sprintf("%s,%s?ts=%s", method, path, now)

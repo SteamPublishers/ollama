@@ -522,7 +522,6 @@ func showOrPullModel(cmd *cobra.Command, client *api.Client, name string, insecu
 }
 
 func RunHandler(cmd *cobra.Command, args []string) error {
-	interactive := true
 
 	opts := runOptions{
 		Model:       args[0],
@@ -592,16 +591,15 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		}
 		opts.ShowConnect = false
 		opts.WordWrap = false
-		interactive = false
 	}
 	opts.Prompt = strings.Join(prompts, " ")
-	if len(prompts) > 0 {
-		interactive = false
-	}
-	// Be quiet if we're redirecting to a pipe or file
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		interactive = false
-	}
+	// if len(prompts) > 0 {
+	// 	interactive = false
+	// }
+	// // Be quiet if we're redirecting to a pipe or file
+	// if !term.IsTerminal(int(os.Stdout.Fd())) {
+	// 	interactive = false
+	// }
 
 	nowrap, err := cmd.Flags().GetBool("nowordwrap")
 	if err != nil {
@@ -684,40 +682,40 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		return errors.New("image generation models are not currently supported")
 	}
 
-	if interactive {
-		if err := loadOrUnloadModel(cmd, &opts); err != nil {
-			var sErr api.AuthorizationError
-			if errors.As(err, &sErr) && sErr.StatusCode == http.StatusUnauthorized {
-				fmt.Printf("You need to be signed in to Ollama to run Cloud models.\n\n")
+	// if interactive {
+	// 	if err := loadOrUnloadModel(cmd, &opts); err != nil {
+	// 		var sErr api.AuthorizationError
+	// 		if errors.As(err, &sErr) && sErr.StatusCode == http.StatusUnauthorized {
+	// 			fmt.Printf("You need to be signed in to Ollama to run Cloud models.\n\n")
 
-				if sErr.SigninURL != "" {
-					fmt.Printf(ConnectInstructions, sErr.SigninURL)
-				}
-				return nil
-			}
-			return err
-		}
+	// 			if sErr.SigninURL != "" {
+	// 				fmt.Printf(ConnectInstructions, sErr.SigninURL)
+	// 			}
+	// 			return nil
+	// 		}
+	// 		return err
+	// 	}
 
-		for _, msg := range info.Messages {
-			switch msg.Role {
-			case "user":
-				fmt.Printf(">>> %s\n", msg.Content)
-			case "assistant":
-				state := &displayResponseState{}
-				displayResponse(msg.Content, opts.WordWrap, state)
-				fmt.Println()
-				fmt.Println()
-			}
-		}
+	// 	for _, msg := range info.Messages {
+	// 		switch msg.Role {
+	// 		case "user":
+	// 			fmt.Printf(">>> %s\n", msg.Content)
+	// 		case "assistant":
+	// 			state := &displayResponseState{}
+	// 			displayResponse(msg.Content, opts.WordWrap, state)
+	// 			fmt.Println()
+	// 			fmt.Println()
+	// 		}
+	// 	}
 
-		return generateInteractive(cmd, opts)
-	}
-	if err := generate(cmd, opts); err != nil {
-		if handleCloudAuthorizationError(err) {
-			return nil
-		}
-		return err
-	}
+	// 	return generateInteractive(cmd, opts)
+	// }
+	// if err := generate(cmd, opts); err != nil {
+	// 	if handleCloudAuthorizationError(err) {
+	// 		return nil
+	// 	}
+	// 	return err
+	// }
 	return nil
 }
 
@@ -1521,137 +1519,6 @@ func chat(cmd *cobra.Command, opts runOptions) (*api.Message, error) {
 	return &api.Message{Role: role, Thinking: thinkingContent.String(), Content: fullResponse.String()}, nil
 }
 
-func generate(cmd *cobra.Command, opts runOptions) error {
-	client, err := api.ClientFromEnvironment()
-	if err != nil {
-		return err
-	}
-
-	p := progress.NewProgress(os.Stderr)
-	defer p.StopAndClear()
-
-	spinner := progress.NewSpinner("")
-	p.Add("", spinner)
-
-	var latest api.GenerateResponse
-
-	generateContext, ok := cmd.Context().Value(generateContextKey("context")).([]int)
-	if !ok {
-		generateContext = []int{}
-	}
-
-	ctx, cancel := context.WithCancel(cmd.Context())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT)
-
-	go func() {
-		<-sigChan
-		cancel()
-	}()
-
-	var state *displayResponseState = &displayResponseState{}
-	var thinkingContent strings.Builder
-	var thinkTagOpened bool = false
-	var thinkTagClosed bool = false
-
-	plainText := !term.IsTerminal(int(os.Stdout.Fd()))
-
-	fn := func(response api.GenerateResponse) error {
-		latest = response
-		content := response.Response
-
-		if response.Response != "" || !opts.HideThinking {
-			p.StopAndClear()
-		}
-
-		if response.Thinking != "" && !opts.HideThinking {
-			if !thinkTagOpened {
-				fmt.Print(thinkingOutputOpeningText(plainText))
-				thinkTagOpened = true
-				thinkTagClosed = false
-			}
-			thinkingContent.WriteString(response.Thinking)
-			displayResponse(response.Thinking, opts.WordWrap, state)
-		}
-
-		if thinkTagOpened && !thinkTagClosed && (content != "" || len(response.ToolCalls) > 0) {
-			if !strings.HasSuffix(thinkingContent.String(), "\n") {
-				fmt.Println()
-			}
-			fmt.Print(thinkingOutputClosingText(plainText))
-			thinkTagOpened = false
-			thinkTagClosed = true
-			state = &displayResponseState{}
-		}
-
-		displayResponse(content, opts.WordWrap, state)
-
-		if response.ToolCalls != nil {
-			toolCalls := response.ToolCalls
-			if len(toolCalls) > 0 {
-				fmt.Print(renderToolCalls(toolCalls, plainText))
-			}
-		}
-
-		return nil
-	}
-
-	if opts.MultiModal {
-		opts.Prompt, opts.Images, err = extractFileData(opts.Prompt)
-		if err != nil {
-			return err
-		}
-	}
-
-	if opts.Format == "json" {
-		opts.Format = `"` + opts.Format + `"`
-	}
-
-	request := api.GenerateRequest{
-		Model:     opts.Model,
-		Prompt:    opts.Prompt,
-		Context:   generateContext,
-		Images:    opts.Images,
-		Format:    json.RawMessage(opts.Format),
-		System:    opts.System,
-		Options:   opts.Options,
-		KeepAlive: opts.KeepAlive,
-		Think:     opts.Think,
-	}
-
-	if err := client.Generate(ctx, &request, fn); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return err
-	}
-
-	if opts.Prompt != "" {
-		fmt.Println()
-		fmt.Println()
-	}
-
-	if !latest.Done {
-		return nil
-	}
-
-	verbose, err := cmd.Flags().GetBool("verbose")
-	if err != nil {
-		return err
-	}
-
-	if verbose {
-		latest.Summary()
-	}
-
-	ctx = context.WithValue(cmd.Context(), generateContextKey("context"), latest.Context)
-	cmd.SetContext(ctx)
-
-	return nil
-}
-
 func RunServer(_ *cobra.Command, _ []string) error {
 	if err := initializeKeypair(); err != nil {
 		return err
@@ -2010,10 +1877,9 @@ func NewCLI() *cobra.Command {
 	} {
 		switch cmd {
 		case runCmd:
-			appendEnvDocs(cmd, []envconfig.EnvVar{envVars["OLLAMA_EDITOR"], envVars["OLLAMA_HOST"], envVars["OLLAMA_NOHISTORY"]})
+			appendEnvDocs(cmd, []envconfig.EnvVar{envVars["OLLAMA_HOST"]})
 		case serveCmd:
 			appendEnvDocs(cmd, []envconfig.EnvVar{
-				envVars["OLLAMA_DEBUG"],
 				envVars["OLLAMA_HOST"],
 				envVars["OLLAMA_CONTEXT_LENGTH"],
 				envVars["OLLAMA_KEEP_ALIVE"],
@@ -2022,7 +1888,6 @@ func NewCLI() *cobra.Command {
 				envVars["OLLAMA_MAX_QUEUE"],
 				envVars["OLLAMA_MODELS"],
 				envVars["OLLAMA_NUM_PARALLEL"],
-				envVars["OLLAMA_NO_CLOUD"],
 				envVars["OLLAMA_NOPRUNE"],
 				envVars["OLLAMA_ORIGINS"],
 				envVars["OLLAMA_SCHED_SPREAD"],
