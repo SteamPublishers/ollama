@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 
@@ -23,7 +22,7 @@ import (
 )
 
 func Execute(args []string) error {
-	slog.SetDefault(logutil.NewLogger(os.Stderr, envconfig.LogLevel()))
+	slog.SetDefault(logutil.NewLogger(logutil.GetLogWriter(), envconfig.LogLevel()))
 
 	var (
 		modelName string

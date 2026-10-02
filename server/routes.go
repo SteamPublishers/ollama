@@ -2022,6 +2022,7 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 	}
 	corsConfig.AllowOrigins = envconfig.AllowedOrigins()
 
+	gin.DefaultWriter = io.Discard
 	r := gin.Default()
 	r.HandleMethodNotAllowed = true
 	r.Use(
@@ -2106,7 +2107,7 @@ func (s *Server) ModelRecommendationsExperimentalHandler(c *gin.Context) {
 }
 
 func Serve(ln net.Listener) error {
-	slog.SetDefault(logutil.NewLogger(os.Stderr, envconfig.LogLevel()))
+	slog.SetDefault(logutil.NewLogger(logutil.GetLogWriter(), envconfig.LogLevel()))
 	slog.Info("server config", "env", envconfig.Values())
 	cloudDisabled, _ := internalcloud.Status()
 	slog.Info(fmt.Sprintf("Ollama cloud disabled: %t", cloudDisabled))

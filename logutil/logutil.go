@@ -12,6 +12,7 @@ import (
 const LevelTrace slog.Level = -8
 
 func NewLogger(w io.Writer, level slog.Level) *slog.Logger {
+	level = GetLogLevel(level)
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{
 		Level:     level,
 		AddSource: true,
