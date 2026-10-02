@@ -3,15 +3,9 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
-)
-
-const (
-	codexSubscriptionMessage = "This model requires a subscription or extra usage credits. Please upgrade at https://ollama.com/upgrade or add extra usage at https://ollama.com/settings to use this model."
-	codexSignInMessage       = "This model requires an Ollama account. Please sign in to Ollama to use this model."
 )
 
 // rewriteAccessErrors changes only Ollama access-error messages. Successful
@@ -24,7 +18,7 @@ func (h *CodexDesktop) rewriteAccessErrors(resp *http.Response) error {
 		resp.Body = &codexAccessErrorStream{
 			ReadCloser: resp.Body,
 			reader:     bufio.NewReader(resp.Body),
-			rewrite:    func(body []byte) ([]byte, bool) { return h.rewriteAccessErrorJSON(body, resp.StatusCode) },
+			rewrite:    func(body []byte) ([]byte, bool) { return body, false },
 			limit:      h.maxBodyBytes,
 		}
 		resp.ContentLength = -1
@@ -46,78 +40,13 @@ func (h *CodexDesktop) rewriteAccessErrors(resp *http.Response) error {
 		return nil
 	}
 	resp.Body.Close()
-	rewritten, changed := h.rewriteAccessErrorJSON(body, resp.StatusCode)
-	resp.Body = io.NopCloser(bytes.NewReader(rewritten))
-	if changed {
-		resp.ContentLength = int64(len(rewritten))
-		resp.Header.Del("Content-Length")
-	}
+	// rewritten, changed := h.rewriteAccessErrorJSON(body, resp.StatusCode)
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	// if changed {
+	// 	resp.ContentLength = int64(len(rewritten))
+	// 	resp.Header.Del("Content-Length")
+	// }
 	return nil
-}
-
-func (h *CodexDesktop) rewriteAccessErrorJSON(body []byte, status int) ([]byte, bool) {
-	var payload map[string]json.RawMessage
-	if json.Unmarshal(body, &payload) != nil || payload == nil {
-		return body, false
-	}
-	var kind string
-	_ = json.Unmarshal(payload["type"], &kind)
-	if kind == "response.failed" {
-		rewritten, changed := h.rewriteAccessErrorJSON(payload["response"], status)
-		if !changed {
-			return body, false
-		}
-		payload["response"] = rewritten
-	} else {
-		var message string
-		var fields map[string]json.RawMessage
-		stringError := json.Unmarshal(payload["error"], &message) == nil
-		flatError := false
-		if !stringError {
-			if _, nested := payload["error"]; !nested && kind == "error" {
-				fields = payload
-				flatError = true
-			} else if json.Unmarshal(payload["error"], &fields) != nil || fields == nil {
-				return body, false
-			}
-			if json.Unmarshal(fields["message"], &message) != nil {
-				return body, false
-			}
-		}
-		var code, errorType string
-		_ = json.Unmarshal(fields["code"], &code)
-		_ = json.Unmarshal(fields["type"], &errorType)
-		var rewritten, reason string
-		switch {
-		case status == http.StatusUnauthorized || code == "authentication_error" || code == "unauthorized" || errorType == "authentication_error" || strings.EqualFold(strings.TrimSpace(message), "unauthorized"):
-			rewritten = codexSignInMessage
-			reason = "sign_in"
-			// Codex displays these errors as plain text, including raw HTTP error
-			// bodies. Keep device sign-in URLs out of the user-facing response.
-			delete(payload, "signin_url")
-			delete(fields, "signin_url")
-		case strings.Contains(strings.ToLower(message), "this model requires a subscription or extra usage"):
-			rewritten = codexSubscriptionMessage
-			reason = "subscription"
-		default:
-			return body, false
-		}
-		h.logger.Debug("Codex Ollama access error", "status", status, "reason", reason)
-		encoded, _ := json.Marshal(rewritten)
-		if stringError {
-			payload["error"] = encoded
-		} else {
-			fields["message"] = encoded
-			if !flatError {
-				payload["error"], _ = json.Marshal(fields)
-			}
-		}
-	}
-	rewritten, err := json.Marshal(payload)
-	if err != nil {
-		return body, false
-	}
-	return rewritten, true
 }
 
 // Buffer one SSE frame, not the whole response. Oversized frames fall back to

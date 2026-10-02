@@ -1,6 +1,8 @@
 package envconfig
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"log/slog"
 	"math"
 	"os"
@@ -433,6 +435,46 @@ func TestNoCloud(t *testing.T) {
 
 			if got := NoCloudSource(); got != tt.wantSource {
 				t.Errorf("NoCloudSource() = %q, want %q", got, tt.wantSource)
+			}
+		})
+	}
+}
+func TestLocalAuth(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		if got := LocalAuth(); got != "" {
+			t.Errorf("LocalAuth() = %q, want empty when unset", got)
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		t.Setenv("LOCAL_AUTH", "bar")
+		if got := LocalAuth(); got != "bar" {
+			t.Errorf("LocalAuth() = %q, want %q", got, "bar")
+		}
+	})
+}
+
+func TestLocalAuthHash(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		if got := LocalAuthHash(); got != "" {
+			t.Errorf("LocalAuthHash() = %q, want empty when LOCAL_AUTH unset", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		passphrase string
+	}{
+		{name: "simple", passphrase: "foo"},
+		{name: "with spaces", passphrase: "correct horse battery staple"},
+	} {
+		wantSum := sha256.Sum256([]byte("sec_" + tc.passphrase + "_msg"))
+		want := base64.StdEncoding.EncodeToString(wantSum[:])
+
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LOCAL_AUTH", tc.passphrase)
+			if got := LocalAuthHash(); got != want {
+				t.Errorf("LocalAuthHash() = %q, want %q", got, want)
 			}
 		})
 	}

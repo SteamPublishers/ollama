@@ -276,11 +276,11 @@ func (c *launcherClient) ensureCloudModelAccess(ctx context.Context, model strin
 }
 
 func (c *launcherClient) modelRecommendationItem(ctx context.Context, model string) (ModelItem, bool) {
-	for _, item := range c.recommendations(ctx) {
-		if item.Name == model {
-			return item, true
-		}
-	}
+	// for _, item := range c.recommendations(ctx) {
+	// 	if item.Name == model {
+	// 		return item, true
+	// 	}
+	// }
 	return ModelItem{}, false
 }
 

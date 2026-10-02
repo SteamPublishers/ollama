@@ -35,8 +35,9 @@ func (e StatusError) Error() string {
 	case e.ErrorMessage != "":
 		return e.ErrorMessage
 	default:
+		return fmt.Sprintf("%d: %v", e.StatusCode, e.ErrorMessage)
 		// this should not happen
-		return "something went wrong, please see the ollama server logs for details"
+		// return "something went wrong, please see the ollama server logs for details"
 	}
 }
 
@@ -50,7 +51,9 @@ func (e AuthorizationError) Error() string {
 	if e.Status != "" {
 		return e.Status
 	}
-	return "something went wrong, please see the ollama server logs for details"
+
+	return fmt.Sprintf("%d", e.StatusCode)
+	// return "something went wrong, please see the ollama server logs for details"
 }
 
 // ImageData represents the raw binary data of an image file.

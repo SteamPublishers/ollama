@@ -527,15 +527,16 @@ func isCloudModel(ctx context.Context, client *api.Client, name string) bool {
 
 // cloudStatusDisabled returns whether cloud usage is currently disabled.
 func cloudStatusDisabled(ctx context.Context, client *api.Client) (disabled bool, known bool) {
-	status, err := client.CloudStatusExperimental(ctx)
-	if err != nil {
-		var statusErr api.StatusError
-		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
-			return false, false
-		}
-		return false, false
-	}
-	return status.Cloud.Disabled, true
+	return true, true
+	// status, err := client.CloudStatusExperimental(ctx)
+	// if err != nil {
+	// 	var statusErr api.StatusError
+	// 	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+	// 		return false, false
+	// 	}
+	// 	return false, false
+	// }
+	// return status.Cloud.Disabled, true
 }
 
 // TODO(parthsareen): this duplicates the pull progress UI in cmd.PullHandler.

@@ -1,0 +1,3 @@
+[submodule "extensions/vscode"]
+	path = extensions/vscode
+	url = git@github.com:SteamPublishers/cp-local-vscode.git

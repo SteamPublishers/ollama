@@ -326,29 +326,34 @@ func cloneModelRecommendations(in []api.ModelRecommendation) []api.ModelRecommen
 }
 
 var defaultModelRecommendations = []api.ModelRecommendation{
+	// {
+	// 	Model:           "kimi-k2.6:cloud",
+	// 	Description:     "State-of-the-art coding, long-horizon execution, and multimodal agent swarm capability",
+	// 	ContextLength:   262_144,
+	// 	MaxOutputTokens: 262_144,
+	// },
+	// {
+	// 	Model:           "glm-5.1:cloud",
+	// 	Description:     "Reasoning and code generation",
+	// 	ContextLength:   202_752,
+	// 	MaxOutputTokens: 131_072,
+	// },
+	// {
+	// 	Model:           "qwen3.5:cloud",
+	// 	Description:     "Reasoning, coding, and agentic tool use with vision",
+	// 	ContextLength:   262_144,
+	// 	MaxOutputTokens: 32_768,
+	// },
+	// {
+	// 	Model:           "minimax-m2.7:cloud",
+	// 	Description:     "Fast, efficient coding and real-world productivity",
+	// 	ContextLength:   204_800,
+	// 	MaxOutputTokens: 128_000,
+	// },
 	{
-		Model:           "kimi-k2.6:cloud",
-		Description:     "State-of-the-art coding, long-horizon execution, and multimodal agent swarm capability",
-		ContextLength:   262_144,
-		MaxOutputTokens: 262_144,
-	},
-	{
-		Model:           "glm-5.1:cloud",
-		Description:     "Reasoning and code generation",
-		ContextLength:   202_752,
-		MaxOutputTokens: 131_072,
-	},
-	{
-		Model:           "qwen3.5:cloud",
-		Description:     "Reasoning, coding, and agentic tool use with vision",
-		ContextLength:   262_144,
-		MaxOutputTokens: 32_768,
-	},
-	{
-		Model:           "minimax-m2.7:cloud",
-		Description:     "Fast, efficient coding and real-world productivity",
-		ContextLength:   204_800,
-		MaxOutputTokens: 128_000,
+		Model:       "Phi‑3‑mini‑4k‑instruct",
+		Description: "strong reasoning and code generation, good for chat‑style tasks",
+		VRAMBytes:   7 * format.GigaByte,
 	},
 	{
 		Model:       "gemma4",
@@ -356,7 +361,7 @@ var defaultModelRecommendations = []api.ModelRecommendation{
 		VRAMBytes:   12 * format.GigaByte,
 	},
 	{
-		Model:       "qwen3.5",
+		Model:       "qwen3.8",
 		Description: "Reasoning, coding, and visual understanding locally",
 		VRAMBytes:   14 * format.GigaByte,
 	},

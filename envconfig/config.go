@@ -1,6 +1,8 @@
 package envconfig
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +82,22 @@ func ConnectableHost() *url.URL {
 	}
 
 	return u
+}
+
+// LocalAuthHash returns the base64-encoded SHA-256 digest of "sec_<passphrase>_msg"
+// when the LOCAL_AUTH passphrase is set, and "" otherwise.
+//
+// The ollama CLI and any co-launched local application use this value as the
+// "Authorization: Internal <hash>" header so the local-only server can admit
+// only callers that share the passphrase. An empty result disables the gate.
+func LocalAuthHash() string {
+	passphrase := Var("LOCAL_AUTH")
+	if passphrase == "" {
+		return ""
+	}
+
+	sum := sha256.Sum256([]byte("sec_" + passphrase + "_msg"))
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 // AllowedOrigins returns a list of allowed origins. AllowedOrigins can be configured via the OLLAMA_ORIGINS environment variable.
@@ -233,6 +251,8 @@ func String(s string) func() string {
 
 var (
 	LLMLibrary = String("OLLAMA_LLM_LIBRARY")
+	// LocalAuth is the passphrase that enables the local-only "Internal" auth gate.
+	LocalAuth = String("LOCAL_AUTH")
 
 	CudaVisibleDevices    = String("CUDA_VISIBLE_DEVICES")
 	HipVisibleDevices     = String("HIP_VISIBLE_DEVICES")

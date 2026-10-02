@@ -142,6 +142,12 @@ func (c *Client) do(ctx context.Context, method, path string, reqData, respData 
 		request.Header.Set("Authorization", token)
 	}
 
+	// Local-only gate: when LOCAL_AUTH is set, co-launched local callers must
+	// present the shared hash. This wins over any cloud token above.
+	if internal := envconfig.LocalAuthHash(); internal != "" {
+		request.Header.Set("Authorization", "Internal "+internal)
+	}
+
 	respObj, err := c.http.Do(request)
 	if err != nil {
 		return err
@@ -206,6 +212,12 @@ func (c *Client) stream(ctx context.Context, method, path string, data any, fn f
 
 	if token != "" {
 		request.Header.Set("Authorization", token)
+	}
+
+	// Local-only gate: when LOCAL_AUTH is set, co-launched local callers must
+	// present the shared hash. This wins over any cloud token above.
+	if internal := envconfig.LocalAuthHash(); internal != "" {
+		request.Header.Set("Authorization", "Internal "+internal)
 	}
 
 	response, err := c.http.Do(request)

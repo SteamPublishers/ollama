@@ -1,24 +1,18 @@
 package anthropic
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ollama/ollama/api"
-	"github.com/ollama/ollama/auth"
-	internalcloud "github.com/ollama/ollama/internal/cloud"
 	"github.com/ollama/ollama/logutil"
 )
 
@@ -1214,84 +1208,83 @@ type OllamaWebSearchResponse struct {
 	Results []OllamaWebSearchResult `json:"results"`
 }
 
-var WebSearchEndpoint = "https://ollama.com/api/web_search"
-
 func WebSearch(ctx context.Context, query string, maxResults int) (*OllamaWebSearchResponse, error) {
-	if internalcloud.Disabled() {
-		logutil.TraceContext(ctx, "anthropic: web search blocked", "reason", "cloud_disabled")
-		return nil, errors.New(internalcloud.DisabledError("web search is unavailable"))
-	}
+	return nil, fmt.Errorf("web feature disabled")
+	// if internalcloud.Disabled() {
+	// 	logutil.TraceContext(ctx, "anthropic: web search blocked", "reason", "cloud_disabled")
+	// 	return nil, errors.New(internalcloud.DisabledError("web search is unavailable"))
+	// }
 
-	if maxResults <= 0 {
-		maxResults = 5
-	}
-	if maxResults > 10 {
-		maxResults = 10
-	}
+	// if maxResults <= 0 {
+	// 	maxResults = 5
+	// }
+	// if maxResults > 10 {
+	// 	maxResults = 10
+	// }
 
-	reqBody := OllamaWebSearchRequest{
-		Query:      query,
-		MaxResults: maxResults,
-	}
+	// reqBody := OllamaWebSearchRequest{
+	// 	Query:      query,
+	// 	MaxResults: maxResults,
+	// }
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal web search request: %w", err)
-	}
+	// body, err := json.Marshal(reqBody)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to marshal web search request: %w", err)
+	// }
 
-	searchURL, err := url.Parse(WebSearchEndpoint)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse web search URL: %w", err)
-	}
-	logutil.TraceContext(ctx, "anthropic: web search request",
-		"query", TraceTruncateString(query),
-		"max_results", maxResults,
-		"url", searchURL.String(),
-	)
+	// searchURL, err := url.Parse(WebSearchEndpoint)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to parse web search URL: %w", err)
+	// }
+	// logutil.TraceContext(ctx, "anthropic: web search request",
+	// 	"query", TraceTruncateString(query),
+	// 	"max_results", maxResults,
+	// 	"url", searchURL.String(),
+	// )
 
-	q := searchURL.Query()
-	q.Set("ts", strconv.FormatInt(time.Now().Unix(), 10))
-	searchURL.RawQuery = q.Encode()
+	// q := searchURL.Query()
+	// q.Set("ts", strconv.FormatInt(time.Now().Unix(), 10))
+	// searchURL.RawQuery = q.Encode()
 
-	signature := ""
-	if strings.EqualFold(searchURL.Hostname(), "ollama.com") {
-		challenge := fmt.Sprintf("%s,%s", http.MethodPost, searchURL.RequestURI())
-		signature, err = auth.Sign(ctx, []byte(challenge))
-		if err != nil {
-			return nil, fmt.Errorf("failed to sign web search request: %w", err)
-		}
-	}
-	logutil.TraceContext(ctx, "anthropic: web search auth", "signed", signature != "")
+	// signature := ""
+	// if strings.EqualFold(searchURL.Hostname(), "ollama.com") {
+	// 	challenge := fmt.Sprintf("%s,%s", http.MethodPost, searchURL.RequestURI())
+	// 	signature, err = auth.Sign(ctx, []byte(challenge))
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("failed to sign web search request: %w", err)
+	// 	}
+	// }
+	// logutil.TraceContext(ctx, "anthropic: web search auth", "signed", signature != "")
 
-	req, err := http.NewRequestWithContext(ctx, "POST", searchURL.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create web search request: %w", err)
-	}
+	// req, err := http.NewRequestWithContext(ctx, "POST", searchURL.String(), bytes.NewReader(body))
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to create web search request: %w", err)
+	// }
 
-	req.Header.Set("Content-Type", "application/json")
-	if signature != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", signature))
-	}
+	// req.Header.Set("Content-Type", "application/json")
+	// if signature != "" {
+	// 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", signature))
+	// }
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("web search request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	logutil.TraceContext(ctx, "anthropic: web search response", "status", resp.StatusCode)
+	// resp, err := http.DefaultClient.Do(req)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("web search request failed: %w", err)
+	// }
+	// defer resp.Body.Close()
+	// logutil.TraceContext(ctx, "anthropic: web search response", "status", resp.StatusCode)
 
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("web search returned status %d: %s", resp.StatusCode, string(respBody))
-	}
+	// if resp.StatusCode != http.StatusOK {
+	// 	respBody, _ := io.ReadAll(resp.Body)
+	// 	return nil, fmt.Errorf("web search returned status %d: %s", resp.StatusCode, string(respBody))
+	// }
 
-	var searchResp OllamaWebSearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-		return nil, fmt.Errorf("failed to decode web search response: %w", err)
-	}
-	logutil.TraceContext(ctx, "anthropic: web search results", "count", len(searchResp.Results))
+	// var searchResp OllamaWebSearchResponse
+	// if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+	// 	return nil, fmt.Errorf("failed to decode web search response: %w", err)
+	// }
+	// logutil.TraceContext(ctx, "anthropic: web search results", "count", len(searchResp.Results))
 
-	return &searchResp, nil
+	// return &searchResp, nil
 }
 
 func ConvertOllamaToAnthropicResults(ollamaResults *OllamaWebSearchResponse) []WebSearchResult {

@@ -351,9 +351,7 @@ func loadOrUnloadModel(cmd *cobra.Command, opts *runOptions) error {
 
 		// Check if user is signed in for ollama.com cloud models
 		if isCloud {
-			if _, err := client.Whoami(cmd.Context()); err != nil {
-				return err
-			}
+			return fmt.Errorf("cloud model disabled")
 		}
 
 		if opts.ShowConnect {

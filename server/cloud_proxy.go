@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,13 +15,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/klauspost/compress/zstd"
 
 	"github.com/ollama/ollama/auth"
 	"github.com/ollama/ollama/envconfig"
-	internalcloud "github.com/ollama/ollama/internal/cloud"
 	"github.com/ollama/ollama/openai"
-	"github.com/ollama/ollama/version"
 )
 
 const (
@@ -69,222 +65,6 @@ func init() {
 	if overridden {
 		slog.Info("cloud base URL override enabled", "env", cloudProxyBaseURLEnv, "url", cloudProxyBaseURL, "mode", mode)
 	}
-}
-
-func cloudPassthroughMiddleware(disabledOperation string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.Request.Method != http.MethodPost {
-			c.Next()
-			return
-		}
-
-		// Decompress zstd-encoded request bodies so we can inspect the model
-		if c.GetHeader("Content-Encoding") == "zstd" {
-			reader, err := zstd.NewReader(c.Request.Body, zstd.WithDecoderMaxMemory(8<<20))
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "failed to decompress request body"})
-				c.Abort()
-				return
-			}
-			defer reader.Close()
-			c.Request.Body = http.MaxBytesReader(c.Writer, io.NopCloser(reader), maxDecompressedBodySize)
-			c.Request.Header.Del("Content-Encoding")
-		}
-
-		// TODO(drifkin): Avoid full-body buffering here for model detection.
-		// A future optimization can parse just enough JSON to read "model" (and
-		// optionally short-circuit cloud-disabled explicit-cloud requests) while
-		// preserving raw passthrough semantics.
-		body, err := readRequestBody(c.Request)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			c.Abort()
-			return
-		}
-
-		model, ok := extractModelField(body)
-		if !ok {
-			c.Next()
-			return
-		}
-
-		modelRef, err := parseAndValidateModelRef(model)
-		if err != nil || modelRef.Source != modelSourceCloud {
-			c.Next()
-			return
-		}
-
-		normalizedBody, err := replaceJSONModelField(body, modelRef.Base)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			c.Abort()
-			return
-		}
-
-		// Keep server-side web search on the local compatibility middleware path.
-		// The converted model requests use Ollama's /api/chat contract, including
-		// for cloud models; all other cloud compatibility traffic remains raw
-		// passthrough.
-		if hasWebSearchTool(c.Request.URL.Path, body) {
-			c.Set(cloudWebSearchOrchestrationKey, true)
-			c.Next()
-			return
-		}
-
-		proxyCloudRequest(c, normalizedBody, disabledOperation)
-		c.Abort()
-	}
-}
-
-func cloudModelPathPassthroughMiddleware(disabledOperation string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		modelName := strings.TrimSpace(c.Param("model"))
-		if modelName == "" {
-			c.Next()
-			return
-		}
-
-		modelRef, err := parseAndValidateModelRef(modelName)
-		if err != nil || modelRef.Source != modelSourceCloud {
-			c.Next()
-			return
-		}
-
-		proxyPath := "/v1/models/" + modelRef.Base
-		proxyCloudRequestWithPath(c, nil, proxyPath, disabledOperation)
-		c.Abort()
-	}
-}
-
-func proxyCloudJSONRequest(c *gin.Context, payload any, disabledOperation string) {
-	// TEMP(drifkin): we currently split out this `WithPath` method because we are
-	// mapping `/v1/messages` + web_search to `/api/chat` temporarily. Once we
-	// stop doing this, we can inline this method.
-	proxyCloudJSONRequestWithPath(c, payload, c.Request.URL.Path, disabledOperation)
-}
-
-func proxyCloudJSONRequestWithPath(c *gin.Context, payload any, path string, disabledOperation string) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	proxyCloudRequestWithPath(c, body, path, disabledOperation)
-}
-
-func proxyCloudRequest(c *gin.Context, body []byte, disabledOperation string) {
-	proxyCloudRequestWithPath(c, body, c.Request.URL.Path, disabledOperation)
-}
-
-func proxyCloudRequestWithPath(c *gin.Context, body []byte, path string, disabledOperation string) {
-	if disabled, _ := internalcloud.Status(); disabled {
-		c.JSON(http.StatusForbidden, gin.H{"error": internalcloud.DisabledError(disabledOperation)})
-		return
-	}
-
-	baseURL, err := url.Parse(cloudProxyBaseURL)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	targetURL := baseURL.ResolveReference(&url.URL{
-		Path:     path,
-		RawQuery: c.Request.URL.RawQuery,
-	})
-
-	outReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL.String(), bytes.NewReader(body))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	copyProxyRequestHeaders(outReq.Header, c.Request.Header)
-	if clientVersion := strings.TrimSpace(version.Version); clientVersion != "" {
-		outReq.Header.Set(cloudProxyClientVersionHeader, clientVersion)
-	}
-	if outReq.Header.Get("Content-Type") == "" && len(body) > 0 {
-		outReq.Header.Set("Content-Type", "application/json")
-	}
-
-	if err := cloudProxySignRequest(outReq.Context(), outReq); err != nil {
-		slog.Warn("cloud proxy signing failed", "error", err)
-		writeCloudUnauthorized(c)
-		return
-	}
-
-	// TODO(drifkin): Add phase-specific proxy timeouts.
-	// Connect/TLS/TTFB should have bounded timeouts, but once streaming starts
-	// we should not enforce a short total timeout for long-lived responses.
-	resp, err := http.DefaultClient.Do(outReq)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	copyProxyResponseHeaders(c.Writer.Header(), resp.Header)
-	c.Status(resp.StatusCode)
-
-	var bodyWriter http.ResponseWriter = c.Writer
-	var framedWriter *jsonlFramingResponseWriter
-	// TEMP(drifkin): only needed on the cloud-proxied first leg of Anthropic
-	// web_search fallback (which is a path we're removing soon). Local
-	// /v1/messages writes one JSON value per streamResponse callback directly
-	// into WebSearchAnthropicWriter, but this proxy copy loop may coalesce
-	// multiple jsonl records into one Write.  WebSearchAnthropicWriter currently
-	// unmarshals one JSON value per Write.
-	if path == "/api/chat" && resp.StatusCode == http.StatusOK && c.GetBool(cloudWebSearchOrchestrationKey) {
-		framedWriter = &jsonlFramingResponseWriter{ResponseWriter: c.Writer}
-		bodyWriter = framedWriter
-	}
-
-	err = copyProxyResponseBody(bodyWriter, resp.Body)
-	if err == nil && framedWriter != nil {
-		err = framedWriter.FlushPending()
-	}
-	if err != nil {
-		ctxErr := c.Request.Context().Err()
-		if errors.Is(err, context.Canceled) && errors.Is(ctxErr, context.Canceled) {
-			slog.Debug(
-				"cloud proxy response stream closed by client",
-				"path", c.Request.URL.Path,
-				"status", resp.StatusCode,
-			)
-			return
-		}
-
-		slog.Warn(
-			"cloud proxy response copy failed",
-			"path", c.Request.URL.Path,
-			"upstream_path", path,
-			"status", resp.StatusCode,
-			"request_context_canceled", ctxErr != nil,
-			"request_context_err", ctxErr,
-			"error", err,
-		)
-		return
-	}
-}
-
-func replaceJSONModelField(body []byte, model string) ([]byte, error) {
-	if len(body) == 0 {
-		return body, nil
-	}
-
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
-	}
-
-	modelJSON, err := json.Marshal(model)
-	if err != nil {
-		return nil, err
-	}
-	payload["model"] = modelJSON
-
-	return json.Marshal(payload)
 }
 
 func readRequestBody(r *http.Request) ([]byte, error) {

@@ -269,10 +269,7 @@ func (s *Server) GenerateHandler(c *gin.Context) {
 	}
 
 	if modelRef.Source == modelSourceCloud {
-		// TODO(drifkin): evaluate an `/api/*` passthrough for cloud where the
-		// original body (modulo model name normalization) is sent to cloud.
-		req.Model = modelRef.Base
-		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
+		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
 
@@ -817,8 +814,7 @@ func (s *Server) EmbedHandler(c *gin.Context) {
 	}
 
 	if modelRef.Source == modelSourceCloud {
-		req.Model = modelRef.Base
-		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
+		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
 
@@ -1061,8 +1057,7 @@ func (s *Server) EmbeddingsHandler(c *gin.Context) {
 	}
 
 	if modelRef.Source == modelSourceCloud {
-		req.Model = modelRef.Base
-		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
+		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
 
@@ -1165,60 +1160,60 @@ func (s *Server) PullHandler(c *gin.Context) {
 	streamResponse(c, ch)
 }
 
-func (s *Server) PushHandler(c *gin.Context) {
-	var req api.PushRequest
-	err := c.ShouldBindJSON(&req)
-	switch {
-	case errors.Is(err, io.EOF):
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
-		return
-	case err != nil:
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// func (s *Server) PushHandler(c *gin.Context) {
+// 	var req api.PushRequest
+// 	err := c.ShouldBindJSON(&req)
+// 	switch {
+// 	case errors.Is(err, io.EOF):
+// 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
+// 		return
+// 	case err != nil:
+// 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+// 		return
+// 	}
 
-	var mname string
-	if req.Model != "" {
-		mname = req.Model
-	} else if req.Name != "" {
-		mname = req.Name
-	} else {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "model is required"})
-		return
-	}
+// 	var mname string
+// 	if req.Model != "" {
+// 		mname = req.Model
+// 	} else if req.Name != "" {
+// 		mname = req.Name
+// 	} else {
+// 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "model is required"})
+// 		return
+// 	}
 
-	ch := make(chan any)
-	go func() {
-		defer close(ch)
-		fn := func(r api.ProgressResponse) {
-			ch <- r
-		}
+// 	ch := make(chan any)
+// 	go func() {
+// 		defer close(ch)
+// 		fn := func(r api.ProgressResponse) {
+// 			ch <- r
+// 		}
 
-		regOpts := &registryOptions{
-			Insecure: req.Insecure,
-		}
+// 		regOpts := &registryOptions{
+// 			Insecure: req.Insecure,
+// 		}
 
-		ctx, cancel := context.WithCancel(c.Request.Context())
-		defer cancel()
+// 		ctx, cancel := context.WithCancel(c.Request.Context())
+// 		defer cancel()
 
-		name, err := getExistingName(model.ParseName(mname))
-		if err != nil {
-			ch <- gin.H{"error": err.Error()}
-			return
-		}
+// 		name, err := getExistingName(model.ParseName(mname))
+// 		if err != nil {
+// 			ch <- gin.H{"error": err.Error()}
+// 			return
+// 		}
 
-		if err := PushModel(ctx, name.DisplayShortest(), regOpts, fn); err != nil {
-			ch <- gin.H{"error": err.Error()}
-		}
-	}()
+// 		if err := PushModel(ctx, name.DisplayShortest(), regOpts, fn); err != nil {
+// 			ch <- gin.H{"error": err.Error()}
+// 		}
+// 	}()
 
-	if req.Stream != nil && !*req.Stream {
-		waitForStream(c, ch)
-		return
-	}
+// 	if req.Stream != nil && !*req.Stream {
+// 		waitForStream(c, ch)
+// 		return
+// 	}
 
-	streamResponse(c, ch)
-}
+// 	streamResponse(c, ch)
+// }
 
 // getExistingName searches the models directory for the longest prefix match of
 // the input name and returns the input name with all existing parts replaced
@@ -1331,23 +1326,7 @@ func (s *Server) ShowHandler(c *gin.Context) {
 	}
 
 	if modelRef.Source == modelSourceCloud {
-		req.Model = modelRef.Base
-		if modelShowCacheable(req) && s.modelCaches != nil && s.modelCaches.show != nil {
-			if disabled, _ := internalcloud.Status(); disabled {
-				c.JSON(http.StatusForbidden, gin.H{"error": internalcloud.DisabledError(cloudErrRemoteModelDetailsUnavailable)})
-				return
-			}
-
-			ctx := context.Background()
-			if c.Request != nil {
-				ctx = c.Request.Context()
-			}
-			if resp, ok := s.modelCaches.show.GetCloudSWR(ctx, req); ok {
-				c.JSON(http.StatusOK, resp)
-				return
-			}
-		}
-		proxyCloudJSONRequest(c, req, cloudErrRemoteModelDetailsUnavailable)
+		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
 
@@ -1805,25 +1784,17 @@ func allowedHost(host string) bool {
 	return false
 }
 
-func allowedHostsMiddleware(addr net.Addr) gin.HandlerFunc {
+func allowedHostsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if addr == nil {
-			c.Next()
-			return
-		}
-
-		if addr, err := netip.ParseAddrPort(addr.String()); err == nil && !addr.Addr().IsLoopback() {
-			c.Next()
-			return
-		}
-
+		// Local-only: only loopback / localhost callers are admitted, even when the
+		// server is bound to an unspecified (0.0.0.0/::) or non-loopback address.
 		host, _, err := net.SplitHostPort(c.Request.Host)
 		if err != nil {
 			host = c.Request.Host
 		}
 
 		if addr, err := netip.ParseAddr(host); err == nil {
-			if addr.IsLoopback() || addr.IsPrivate() || addr.IsUnspecified() || isLocalIP(addr) {
+			if addr.IsLoopback() {
 				c.Next()
 				return
 			}
@@ -1840,6 +1811,30 @@ func allowedHostsMiddleware(addr net.Addr) gin.HandlerFunc {
 		}
 
 		c.AbortWithStatus(http.StatusForbidden)
+	}
+}
+
+// localAuthScheme is the Authorization scheme the local-only gate expects.
+const localAuthScheme = "Internal"
+
+// allowedLocalAuth enforces that local callers present an
+// "Authorization: Internal <hash>" header whose hash matches
+// envconfig.LocalAuthHash(). When LOCAL_AUTH is unset the hash is empty and the
+// gate passes every request through, so it is fully opt-in.
+func allowedLocalAuth() gin.HandlerFunc {
+	expected := envconfig.LocalAuthHash()
+	return func(c *gin.Context) {
+		if expected == "" {
+			c.Next()
+			return
+		}
+
+		if c.GetHeader("Authorization") != localAuthScheme+" "+expected {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+
+		c.Next()
 	}
 }
 
@@ -1880,7 +1875,8 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 	r.HandleMethodNotAllowed = true
 	r.Use(
 		cors.New(corsConfig),
-		allowedHostsMiddleware(s.addr),
+		allowedHostsMiddleware(),
+		allowedLocalAuth(),
 	)
 
 	// General
@@ -1895,48 +1891,46 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 
 	// Local model cache management (new implementation is at end of function)
 	r.POST("/api/pull", s.PullHandler)
-	r.POST("/api/push", s.PushHandler)
+	// r.POST("/api/push", s.PushHandler)
 	r.HEAD("/api/tags", s.ListHandler)
 	r.GET("/api/tags", s.ListHandler)
 	r.POST("/api/show", s.ShowHandler)
 	r.DELETE("/api/delete", s.DeleteHandler)
 
-	r.POST("/api/me", s.WhoamiHandler)
+	// r.POST("/api/me", s.WhoamiHandler)
 
-	r.POST("/api/signout", s.SignoutHandler)
-	// deprecated
-	r.DELETE("/api/user/keys/:encodedKey", s.SignoutHandler)
+	// r.POST("/api/signout", s.SignoutHandler)
+	// // deprecated
+	// r.DELETE("/api/user/keys/:encodedKey", s.SignoutHandler)
 
 	// Create
 	r.POST("/api/blobs/:digest", s.CreateBlobHandler)
 	r.HEAD("/api/blobs/:digest", s.HeadBlobHandler)
 	r.POST("/api/copy", s.CopyHandler)
-	r.POST("/api/experimental/web_search", s.WebSearchExperimentalHandler)
-	r.POST("/api/experimental/web_fetch", s.WebFetchExperimentalHandler)
 	r.GET("/api/experimental/model-recommendations", s.ModelRecommendationsExperimentalHandler)
 
 	// Inference
 	r.GET("/api/ps", s.PsHandler)
-	r.POST("/api/generate", s.withInferenceRequestLogging("/api/generate", s.GenerateHandler)...)
-	r.POST("/api/chat", s.withInferenceRequestLogging("/api/chat", s.ChatHandler)...)
+	r.POST("/api/generate", s.GenerateHandler)
+	r.POST("/api/chat", s.ChatHandler)
 	r.POST("/api/embed", s.EmbedHandler)
 	r.POST("/api/embeddings", s.EmbeddingsHandler)
 
 	// Inference (OpenAI compatibility)
 	// TODO(cloud-stage-a): apply Modelfile overlay deltas for local models with cloud
 	// parents on v1 request families while preserving this explicit :cloud passthrough.
-	r.POST("/v1/chat/completions", s.withInferenceRequestLogging("/v1/chat/completions", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.ChatMiddleware(), s.ChatHandler)...)
-	r.POST("/v1/completions", s.withInferenceRequestLogging("/v1/completions", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.CompletionsMiddleware(), s.GenerateHandler)...)
-	r.POST("/v1/embeddings", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.EmbeddingsMiddleware(), s.EmbedHandler)
+	r.POST("/v1/chat/completions", middleware.ChatMiddleware(), s.ChatHandler)
+	r.POST("/v1/completions", middleware.CompletionsMiddleware(), s.GenerateHandler)
+	r.POST("/v1/embeddings", middleware.EmbeddingsMiddleware(), s.EmbedHandler)
 	r.GET("/v1/models", middleware.ListMiddleware(), s.ListHandler)
-	r.GET("/v1/models/:model", cloudModelPathPassthroughMiddleware(cloudErrRemoteModelDetailsUnavailable), middleware.RetrieveMiddleware(), s.ShowHandler)
-	r.POST("/v1/responses", s.withInferenceRequestLogging("/v1/responses", s.responsesCompactionMiddleware(), cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.ResponsesMiddleware(), s.ChatHandler)...)
+	r.GET("/v1/models/:model", middleware.RetrieveMiddleware(), s.ShowHandler)
+	r.POST("/v1/responses", middleware.ResponsesMiddleware(), s.ChatHandler)
 	r.POST("/v1/responses/compact", s.ResponsesCompactHandler)
 	// OpenAI-compatible audio endpoint
 	r.POST("/v1/audio/transcriptions", middleware.TranscriptionMiddleware(), s.ChatHandler)
 
 	// Inference (Anthropic compatibility)
-	r.POST("/v1/messages", s.withInferenceRequestLogging("/v1/messages", cloudPassthroughMiddleware(cloudErrRemoteInferenceUnavailable), middleware.AnthropicMessagesMiddleware(), s.ChatHandler)...)
+	r.POST("/v1/messages", s.ChatHandler)
 
 	return r, nil
 }
@@ -1944,14 +1938,14 @@ func (s *Server) GenerateRoutes() (http.Handler, error) {
 func (s *Server) ModelRecommendationsExperimentalHandler(c *gin.Context) {
 	recs := defaultModelRecommendations
 	source := "default"
-	if s.modelCaches != nil && s.modelCaches.recommendations != nil {
-		ctx := context.Background()
-		if c.Request != nil {
-			ctx = c.Request.Context()
-		}
-		recs = s.modelCaches.recommendations.GetSWR(ctx)
-		source = "cache"
-	}
+	// if s.modelCaches != nil && s.modelCaches.recommendations != nil {
+	// 	ctx := context.Background()
+	// 	if c.Request != nil {
+	// 		ctx = c.Request.Context()
+	// 	}
+	// 	recs = s.modelCaches.recommendations.GetSWR(ctx)
+	// 	source = "cache"
+	// }
 
 	slog.Debug("serving model recommendations", "recommendation_source", source, "count", len(recs))
 	c.JSON(http.StatusOK, api.ModelRecommendationsResponse{
@@ -2166,120 +2160,92 @@ func (s *Server) StatusHandler(c *gin.Context) {
 	})
 }
 
-func (s *Server) WebSearchExperimentalHandler(c *gin.Context) {
-	s.webExperimentalProxyHandler(c, "/api/web_search", cloudErrWebSearchUnavailable)
-}
+// func (s *Server) WhoamiHandler(c *gin.Context) {
+// 	// todo allow other hosts
+// 	u, err := url.Parse("https://ollama.com")
+// 	if err != nil {
+// 		slog.Error(err.Error())
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "URL parse error"})
+// 		return
+// 	}
 
-func (s *Server) WebFetchExperimentalHandler(c *gin.Context) {
-	s.webExperimentalProxyHandler(c, "/api/web_fetch", cloudErrWebFetchUnavailable)
-}
+// 	client := api.NewClient(u, http.DefaultClient)
+// 	user, err := client.Whoami(c)
+// 	if err != nil {
+// 		var authErr api.AuthorizationError
+// 		if errors.As(err, &authErr) && authErr.StatusCode == http.StatusUnauthorized {
+// 			// Preserve an actionable sign-in response for launch; other failures
+// 			// below mean account or plan verification is temporarily unavailable.
+// 			sURL := authErr.SigninURL
+// 			if sURL == "" {
+// 				var sErr error
+// 				sURL, sErr = signinURL()
+// 				if sErr != nil {
+// 					slog.Error(sErr.Error())
+// 					c.JSON(http.StatusInternalServerError, gin.H{"error": "error getting authorization details"})
+// 					return
+// 				}
+// 			}
+// 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "signin_url": sURL})
+// 			return
+// 		}
 
-func (s *Server) webExperimentalProxyHandler(c *gin.Context, proxyPath, disabledOperation string) {
-	// This endpoint is authenticated by the server's cloud signature. A client
-	// may have supplied an unrelated provider credential (for example, Codex's
-	// Responses API key); it must not be sent to the web-search service.
-	c.Request.Header.Del("Authorization")
+// 		slog.Error(err.Error())
+// 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "account unavailable"})
+// 		return
+// 	}
 
-	body, err := readRequestBody(c.Request)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// 	if user == nil || user.Name == "" {
+// 		sURL, sErr := signinURL()
+// 		if sErr != nil {
+// 			slog.Error(sErr.Error())
+// 			c.JSON(http.StatusInternalServerError, gin.H{"error": "error getting authorization details"})
+// 			return
+// 		}
 
-	if len(bytes.TrimSpace(body)) == 0 {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "missing request body"})
-		return
-	}
+// 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "signin_url": sURL})
+// 		return
+// 	}
 
-	proxyCloudRequestWithPath(c, body, proxyPath, disabledOperation)
-}
+// 	if strings.TrimSpace(user.Plan) == "" {
+// 		slog.Warn("account plan was not set; defaulting to free")
+// 		user.Plan = "free"
+// 	}
+// 	c.JSON(http.StatusOK, user)
+// }
 
-func (s *Server) WhoamiHandler(c *gin.Context) {
-	// todo allow other hosts
-	u, err := url.Parse("https://ollama.com")
-	if err != nil {
-		slog.Error(err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "URL parse error"})
-		return
-	}
+// func (s *Server) SignoutHandler(c *gin.Context) {
+// 	pubKey, err := auth.GetPublicKey()
+// 	if err != nil {
+// 		slog.Error("couldn't get public key", "error", err)
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "there was an error signing out"})
+// 		return
+// 	}
 
-	client := api.NewClient(u, http.DefaultClient)
-	user, err := client.Whoami(c)
-	if err != nil {
-		var authErr api.AuthorizationError
-		if errors.As(err, &authErr) && authErr.StatusCode == http.StatusUnauthorized {
-			// Preserve an actionable sign-in response for launch; other failures
-			// below mean account or plan verification is temporarily unavailable.
-			sURL := authErr.SigninURL
-			if sURL == "" {
-				var sErr error
-				sURL, sErr = signinURL()
-				if sErr != nil {
-					slog.Error(sErr.Error())
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "error getting authorization details"})
-					return
-				}
-			}
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "signin_url": sURL})
-			return
-		}
+// 	encKey := base64.RawURLEncoding.EncodeToString([]byte(pubKey))
 
-		slog.Error(err.Error())
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "account unavailable"})
-		return
-	}
+// 	// todo allow other hosts
+// 	u, err := url.Parse("https://ollama.com")
+// 	if err != nil {
+// 		slog.Error(err.Error())
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "URL parse error"})
+// 		return
+// 	}
 
-	if user == nil || user.Name == "" {
-		sURL, sErr := signinURL()
-		if sErr != nil {
-			slog.Error(sErr.Error())
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "error getting authorization details"})
-			return
-		}
+// 	client := api.NewClient(u, http.DefaultClient)
+// 	err = client.Disconnect(c, encKey)
+// 	if err != nil {
+// 		var authError api.AuthorizationError
+// 		if errors.As(err, &authError) {
+// 			c.JSON(http.StatusUnauthorized, gin.H{"error": "you are not currently signed in"})
+// 			return
+// 		}
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": "there was an error signing out"})
+// 		return
+// 	}
 
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "signin_url": sURL})
-		return
-	}
-
-	if strings.TrimSpace(user.Plan) == "" {
-		slog.Warn("account plan was not set; defaulting to free")
-		user.Plan = "free"
-	}
-	c.JSON(http.StatusOK, user)
-}
-
-func (s *Server) SignoutHandler(c *gin.Context) {
-	pubKey, err := auth.GetPublicKey()
-	if err != nil {
-		slog.Error("couldn't get public key", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "there was an error signing out"})
-		return
-	}
-
-	encKey := base64.RawURLEncoding.EncodeToString([]byte(pubKey))
-
-	// todo allow other hosts
-	u, err := url.Parse("https://ollama.com")
-	if err != nil {
-		slog.Error(err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "URL parse error"})
-		return
-	}
-
-	client := api.NewClient(u, http.DefaultClient)
-	err = client.Disconnect(c, encKey)
-	if err != nil {
-		var authError api.AuthorizationError
-		if errors.As(err, &authError) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "you are not currently signed in"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "there was an error signing out"})
-		return
-	}
-
-	c.JSON(http.StatusOK, nil)
-}
+// 	c.JSON(http.StatusOK, nil)
+// }
 
 func (s *Server) PsHandler(c *gin.Context) {
 	models := []api.ProcessModelResponse{}
@@ -2474,12 +2440,7 @@ func (s *Server) ChatHandler(c *gin.Context) {
 	}
 
 	if modelRef.Source == modelSourceCloud {
-		req.Model = modelRef.Base
-		if c.GetBool(cloudWebSearchOrchestrationKey) {
-			proxyCloudJSONRequestWithPath(c, req, "/api/chat", cloudErrRemoteInferenceUnavailable)
-			return
-		}
-		proxyCloudJSONRequest(c, req, cloudErrRemoteInferenceUnavailable)
+		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
 
