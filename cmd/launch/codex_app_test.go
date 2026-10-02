@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cmd/internal/fileutil"
 	"github.com/ollama/ollama/internal/proxy"
+	"github.com/ollama/ollama/model/renderers"
 	"github.com/ollama/ollama/types/model"
 )
 
@@ -63,6 +65,22 @@ func withCodexAppProcessHooks(t *testing.T, isRunning func() bool, quit func() e
 		codexAppCanOpenID = oldCanOpenID
 		codexAppExitTimeout = oldExitTimeout
 	})
+}
+
+func stubCodexAppProcessCommands(t *testing.T, commands map[string]string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test commands require a POSIX shell")
+	}
+
+	binDir := t.TempDir()
+	for name, script := range commands {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Never fall back to the real osascript or another system command.
+	t.Setenv("PATH", binDir)
 }
 
 func TestCodexAppIntegration(t *testing.T) {
@@ -1558,6 +1576,25 @@ func TestCodexAppConfigureUsesConnectableHostForUnspecifiedBindAddress(t *testin
 }
 
 func TestCodexAppHostChangePreservesRestoreState(t *testing.T) {
+	for _, host := range []string{
+		"http://127.0.0.1:11434",
+		"http://localhost:11434",
+		"http://localhost:11434/ollama",
+		"http://127.0.0.1:11434/ollama",
+		"http://[::1]:11434/ollama",
+	} {
+		t.Run(host, func(t *testing.T) {
+			t.Run("restore", func(t *testing.T) {
+				testCodexAppHostChangePreservesRestoreState(t, host, false)
+			})
+			t.Run("reconfigure then restore", func(t *testing.T) {
+				testCodexAppHostChangePreservesRestoreState(t, host, true)
+			})
+		})
+	}
+}
+
+func testCodexAppHostChangePreservesRestoreState(t *testing.T, host string, reconfigure bool) {
 	tmpDir := t.TempDir()
 	setTestHome(t, tmpDir)
 	withCodexAppPlatform(t, "darwin")
@@ -1575,10 +1612,16 @@ func TestCodexAppHostChangePreservesRestoreState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+	t.Setenv("OLLAMA_HOST", host)
 	app := &CodexApp{}
 	if err := app.ConfigureWithModels("llama3.2", testLaunchModels("llama3.2")); err != nil {
 		t.Fatalf("initial ConfigureWithModels returned error: %v", err)
+	}
+	if !app.OllamaConfigured() {
+		t.Fatal("generated configuration is not recognized as owned")
+	}
+	if got := app.CurrentModel(); got != "llama3.2" {
+		t.Fatalf("CurrentModel after setup = %q, want llama3.2", got)
 	}
 
 	// A changed server address must not make the off-switch disappear or cause
@@ -1587,8 +1630,20 @@ func TestCodexAppHostChangePreservesRestoreState(t *testing.T) {
 	if !app.OllamaConfigured() {
 		t.Fatal("OllamaConfigured = false after host change, want managed config to remain detectable")
 	}
-	if err := app.ConfigureWithModels("gemma4", testLaunchModels("gemma4")); err != nil {
-		t.Fatalf("updated ConfigureWithModels returned error: %v", err)
+	if got := app.CurrentModel(); got != "" {
+		t.Fatalf("CurrentModel after host change = %q, want empty to require launcher reconfiguration", got)
+	}
+	if reconfigure {
+		if err := app.ConfigureWithModels("gemma4", testLaunchModels("gemma4")); err != nil {
+			t.Fatalf("updated ConfigureWithModels returned error: %v", err)
+		}
+		updated, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := codexRootStringValue(string(updated), codexRootOpenAIBaseURLKey); got != "http://127.0.0.1:22434/api/codex/v1" {
+			t.Fatalf("updated endpoint = %q, want current host", got)
+		}
 	}
 	if err := app.RestoreFromDesktop(false); err != nil {
 		t.Fatalf("RestoreFromDesktop returned error: %v", err)
@@ -1980,10 +2035,10 @@ func TestCodexAppConfigurePopulatesCatalogFromEnrichedModels(t *testing.T) {
 			t.Fatalf("supported_reasoning_levels for %q = %T, want list", slug, model["supported_reasoning_levels"])
 		}
 		if slug == "gemma4" {
-			if model["default_reasoning_level"] != "medium" {
-				t.Fatalf("default_reasoning_level for %q = %v, want medium", slug, model["default_reasoning_level"])
+			if model["default_reasoning_level"] != "high" {
+				t.Fatalf("default_reasoning_level for %q = %v, want high", slug, model["default_reasoning_level"])
 			}
-			wantEfforts := []string{"none", "medium"}
+			wantEfforts := []string{"none", "high"}
 			gotEfforts := make([]string, 0, len(levels))
 			for _, level := range levels {
 				entry, ok := level.(map[string]any)
@@ -2056,10 +2111,10 @@ func TestCodexAppConfigurePopulatesCatalogFromEnrichedModels(t *testing.T) {
 		t.Fatalf("routing catalog models = %#v, want 3 selected Ollama models", routingCatalog.Models)
 	}
 	gemmaThinking := routingCatalog.Models[0].Thinking
-	if routingCatalog.Models[0].Slug != "gemma4" || !gemmaThinking.Supported || !slices.Equal(gemmaThinking.Levels, []string{"none", "medium"}) {
-		t.Fatalf("gemma4 routing thinking = %+v, want binary off/medium metadata", gemmaThinking)
+	if routingCatalog.Models[0].Slug != "gemma4" || !gemmaThinking.Supported || !slices.Equal(gemmaThinking.Levels, []string{"none", "high"}) {
+		t.Fatalf("gemma4 routing thinking = %+v, want binary off/high metadata", gemmaThinking)
 	}
-	if gemmaThinking.Values["none"] != false || gemmaThinking.Values["medium"] != true {
+	if gemmaThinking.Values["none"] != false || gemmaThinking.Values["high"] != true {
 		t.Fatalf("gemma4 routing thinking values = %#v, want exact false/true values", gemmaThinking.Values)
 	}
 	for _, routed := range routingCatalog.Models[1:] {
@@ -2081,7 +2136,14 @@ func TestCodexAppThinkingLevelsUseRecommendationsThenFallbacks(t *testing.T) {
 		wantValues     map[string]any
 	}{
 		{name: "non-thinking model"},
-		{name: "binary fallback", thinking: true, wantInitial: "medium", wantLevels: []string{"none", "medium"}, wantValues: map[string]any{"none": false, "medium": true}},
+		{
+			name:           "harmony descriptor without family fallback",
+			recommendation: renderers.ThinkingForRenderer("harmony"),
+			wantInitial:    "medium",
+			wantLevels:     []string{"low", "medium", "high"},
+			wantValues:     map[string]any{"low": "low", "medium": "medium", "high": "high"},
+		},
+		{name: "binary fallback", thinking: true, wantInitial: "high", wantLevels: []string{"none", "high"}, wantValues: map[string]any{"none": false, "high": true}},
 		{
 			name:           "recommendation with adjustable strings",
 			recommendation: &api.ModelRecommendationThinking{Values: []any{"low", "high", "max"}, Default: "high"},
@@ -2092,16 +2154,39 @@ func TestCodexAppThinkingLevelsUseRecommendationsThenFallbacks(t *testing.T) {
 		{
 			name:           "recommendation with mixed boolean and string values",
 			recommendation: &api.ModelRecommendationThinking{Values: []any{false, true, "max"}, Default: true},
-			wantInitial:    "medium",
-			wantLevels:     []string{"none", "medium", "max"},
-			wantValues:     map[string]any{"none": false, "medium": true, "max": "max"},
+			wantInitial:    "high",
+			wantLevels:     []string{"none", "high", "max"},
+			wantValues:     map[string]any{"none": false, "high": true, "max": "max"},
+		},
+		{
+			name:           "boolean on is distinct from named medium",
+			recommendation: &api.ModelRecommendationThinking{Values: []any{false, true, "medium"}, Default: true},
+			wantInitial:    "high",
+			wantLevels:     []string{"none", "high", "medium"},
+			wantValues:     map[string]any{"none": false, "high": true, "medium": "medium"},
 		},
 		{
 			name:           "recommendation with binary thinking off by default",
 			recommendation: &api.ModelRecommendationThinking{Values: []any{false, true}, Default: false},
 			wantInitial:    "none",
-			wantLevels:     []string{"none", "medium"},
-			wantValues:     map[string]any{"none": false, "medium": true},
+			wantLevels:     []string{"none", "high"},
+			wantValues:     map[string]any{"none": false, "high": true},
+		},
+		{
+			name:           "xhigh is retained",
+			recommendation: &api.ModelRecommendationThinking{Values: []any{false, "low", "medium", "xhigh"}, Default: "medium"},
+			wantInitial:    "medium", wantLevels: []string{"none", "low", "medium", "xhigh"},
+			wantValues: map[string]any{"none": false, "low": "low", "medium": "medium", "xhigh": "xhigh"},
+		},
+		{
+			name:           "partial catalog keeps controls with unrepresentable default",
+			recommendation: &api.ModelRecommendationThinking{Values: []any{"low", "high", "turbo"}, Default: "turbo"},
+			wantLevels:     []string{"low", "high"}, wantValues: map[string]any{"low": "low", "high": "high"},
+		},
+		{
+			name:           "literal high takes its label",
+			recommendation: &api.ModelRecommendationThinking{Values: []any{false, true, "high"}, Default: true},
+			wantLevels:     []string{"none", "high"}, wantValues: map[string]any{"none": false, "high": "high"},
 		},
 		{
 			name:           "explicit non-thinking recommendation",
@@ -2112,12 +2197,12 @@ func TestCodexAppThinkingLevelsUseRecommendationsThenFallbacks(t *testing.T) {
 			name:           "invalid recommendation uses capability fallback",
 			thinking:       true,
 			recommendation: &api.ModelRecommendationThinking{Values: []any{"low", "high"}, Default: "max"},
-			wantInitial:    "medium",
-			wantLevels:     []string{"none", "medium"},
-			wantValues:     map[string]any{"none": false, "medium": true},
+			wantInitial:    "high",
+			wantLevels:     []string{"none", "high"},
+			wantValues:     map[string]any{"none": false, "high": true},
 		},
 		{name: "model name alone does not infer thinking", modelName: "glm-5.3-flash:cloud"},
-		{name: "similar unverified tag uses fallback", modelName: "glm-5.3-flash:custom", thinking: true, wantInitial: "medium", wantLevels: []string{"none", "medium"}},
+		{name: "similar unverified tag uses fallback", modelName: "glm-5.3-flash:custom", thinking: true, wantInitial: "high", wantLevels: []string{"none", "high"}},
 		{name: "GLM 5.3 Flash family fallback", family: "glm5_next", thinking: true, wantInitial: "max", wantLevels: []string{"low", "high", "max"}},
 		{name: "GLM 5.3 family fallback", modelName: "glm-5.3:cloud", family: "glm_dsa_moe", thinking: true, wantInitial: "max", wantLevels: []string{"low", "high", "max"}},
 		{name: "GPT-OSS family", family: "gpt-oss", thinking: true, wantInitial: "medium", wantLevels: []string{"low", "medium", "high"}},
@@ -2178,15 +2263,15 @@ func TestCodexAppConfigureWritesRecommendationThinkingContract(t *testing.T) {
 	if len(catalog.Models) == 0 || catalog.Models[0].Slug != model.Name {
 		t.Fatalf("catalog models = %#v, want selected model first", catalog.Models)
 	}
-	if got := catalog.Models[0].DefaultReasoningLevel; got != "medium" {
-		t.Fatalf("default reasoning level = %q, want medium for Ollama true", got)
+	if got := catalog.Models[0].DefaultReasoningLevel; got != "high" {
+		t.Fatalf("default reasoning level = %q, want high for Ollama true", got)
 	}
 	var levels []string
 	for _, level := range catalog.Models[0].SupportedReasoningLevels {
 		levels = append(levels, level.Effort)
 	}
-	if !slices.Equal(levels, []string{"none", "medium", "max"}) {
-		t.Fatalf("reasoning levels = %v, want none/medium/max", levels)
+	if !slices.Equal(levels, []string{"none", "high", "max"}) {
+		t.Fatalf("reasoning levels = %v, want none/high/max", levels)
 	}
 
 	configPath, err := codexConfigPath()
@@ -2200,7 +2285,8 @@ func TestCodexAppConfigureWritesRecommendationThinkingContract(t *testing.T) {
 	var routing struct {
 		Models []struct {
 			Thinking struct {
-				Values map[string]any `json:"values"`
+				Values   map[string]any                   `json:"values"`
+				Controls *api.ModelRecommendationThinking `json:"controls"`
 			} `json:"thinking"`
 		} `json:"models"`
 	}
@@ -2208,7 +2294,10 @@ func TestCodexAppConfigureWritesRecommendationThinkingContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := routing.Models[0].Thinking.Values
-	if values["none"] != false || values["medium"] != true || values["max"] != "max" {
+	if diff := cmp.Diff(model.Thinking, routing.Models[0].Thinking.Controls); diff != "" {
+		t.Fatalf("routing lost the model contract: %s", diff)
+	}
+	if values["none"] != false || values["high"] != true || values["max"] != "max" {
 		t.Fatalf("routing thinking values = %#v, want exact endpoint values", values)
 	}
 }
@@ -2511,8 +2600,8 @@ func TestCodexAppRestoreRestoresDesktopReasoningEffortsExactly(t *testing.T) {
 	}{
 		{
 			name:         "existing user choices",
-			desktopValue: `enabled-reasoning-efforts = ["minimal", "high", "persistent"]` + "\n",
-			wantOriginal: []string{"minimal", "high", "persistent"},
+			desktopValue: `enabled-reasoning-efforts = ["minimal", "persistent"]` + "\n",
+			wantOriginal: []string{"minimal", "persistent"},
 		},
 		{name: "setting originally absent"},
 	}
@@ -2538,10 +2627,10 @@ func TestCodexAppRestoreRestoresDesktopReasoningEffortsExactly(t *testing.T) {
 			}
 
 			app := &CodexApp{}
-			if err := app.ConfigureWithModels("gemma4", []LaunchModel{{
-				Name:         "gemma4",
-				Capabilities: []model.Capability{model.CapabilityThinking},
-			}}); err != nil {
+			if err := app.ConfigureWithModels("gemma4", []LaunchModel{
+				{Name: "gemma4", Capabilities: []model.Capability{model.CapabilityThinking}},
+				{Name: "custom-qwen", Thinking: &api.ModelRecommendationThinking{Values: []any{false, "low", "medium", "xhigh"}, Default: "medium"}},
+			}); err != nil {
 				t.Fatalf("ConfigureWithModels returned error: %v", err)
 			}
 
@@ -2556,6 +2645,11 @@ func TestCodexAppRestoreRestoresDesktopReasoningEffortsExactly(t *testing.T) {
 			managedEfforts, ok := codexAppConfigReasoningEfforts(managedConfig)
 			if !ok || !slices.Contains(managedEfforts, "none") || !slices.Contains(managedEfforts, "max") {
 				t.Fatalf("managed reasoning efforts = %v, %v; want none and max enabled", managedEfforts, ok)
+			}
+			for _, level := range append(slices.Clone(tt.wantOriginal), "high", "low", "medium", "xhigh") {
+				if !slices.Contains(managedEfforts, level) {
+					t.Errorf("managed efforts %v hide %q", managedEfforts, level)
+				}
 			}
 
 			if err := app.Restore(); err != nil {
@@ -3018,6 +3112,81 @@ func TestCodexAppRestoreDoesNotTreatCLIProfileAsOwned(t *testing.T) {
 	}
 }
 
+func TestCodexAppDarwinOpenArgs(t *testing.T) {
+	for _, path := range []string{"", "/Applications/ChatGPT.app", "/Users/test/Apps/ChatGPT Preview.app"} {
+		t.Run(path, func(t *testing.T) {
+			setTestHome(t, t.TempDir())
+			withCodexAppPlatform(t, "darwin")
+			t.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+			usualArgs := []string{"-b", codexAppBundleID}
+			ollamaArgs := []string{"-b", codexAppBundleID, "codex://threads/new?mode=codex"}
+			if path != "" {
+				usualArgs = []string{path}
+				ollamaArgs = []string{"-a", path, "codex://threads/new?mode=codex"}
+			}
+			if got := codexAppDarwinOpenArgs(path); !slices.Equal(got, usualArgs) {
+				t.Fatalf("unconfigured open args = %q, want %q", got, usualArgs)
+			}
+
+			app := &CodexApp{}
+			if err := app.ConfigureWithModels("qwen3:8b", testLaunchModels("qwen3:8b")); err != nil {
+				t.Fatal(err)
+			}
+			if got := codexAppDarwinOpenArgs(path); !slices.Equal(got, ollamaArgs) {
+				t.Fatalf("Ollama open args = %q, want %q", got, ollamaArgs)
+			}
+
+			if err := restoreCodexAppProfile(); err != nil {
+				t.Fatal(err)
+			}
+			if got := codexAppDarwinOpenArgs(path); !slices.Equal(got, usualArgs) {
+				t.Fatalf("restored open args = %q, want %q", got, usualArgs)
+			}
+		})
+	}
+}
+
+func TestCodexAppDesktopLaunchMode(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	withCodexAppPlatform(t, "darwin")
+	withCodexAppRouterHealth(t, func() error { return nil })
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+	running := false
+	var openedArgs [][]string
+	withCodexAppProcessHooks(t,
+		func() bool { return running },
+		func() error { running = false; return nil },
+		func() error {
+			openedArgs = append(openedArgs, codexAppDarwinOpenArgs("/Applications/ChatGPT.app"))
+			running = true
+			return nil
+		},
+	)
+	codexAppCanOpenID = func() bool { return true }
+
+	app := &CodexApp{}
+	if err := app.UseOllamaFromDesktop("qwen3:8b", testLaunchModels("qwen3:8b"), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RestartFromDesktop(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RestoreFromDesktop(true); err != nil {
+		t.Fatal(err)
+	}
+
+	want := [][]string{
+		{"-a", "/Applications/ChatGPT.app", "codex://threads/new?mode=codex"},
+		{"-a", "/Applications/ChatGPT.app", "codex://threads/new?mode=codex"},
+		{"/Applications/ChatGPT.app"},
+	}
+	if !slices.EqualFunc(openedArgs, want, slices.Equal[[]string]) {
+		t.Fatalf("open args = %q, want first launch and restart in Codex, then a normal launch on restore: %q", openedArgs, want)
+	}
+}
+
 func TestCodexAppRunRestartsRunningAppWhenConfirmed(t *testing.T) {
 	withCodexAppPlatform(t, "darwin")
 	restoreConfirm := withLaunchConfirmPolicy(launchConfirmPolicy{yes: true})
@@ -3266,6 +3435,80 @@ func TestCodexAppRunRejectsExtraArgs(t *testing.T) {
 	err := (&CodexApp{}).Run("qwen3.5", nil, []string{"--foo"})
 	if err == nil || !strings.Contains(err.Error(), "does not accept extra arguments") {
 		t.Fatalf("Run error = %v, want extra args rejection", err)
+	}
+}
+
+func TestDefaultCodexAppIsRunningProcesses(t *testing.T) {
+	otherPID := os.Getpid() + 1
+	for _, tt := range []struct {
+		name          string
+		goos          string
+		output        string
+		exitCode      string
+		nameMatchExit string
+		want          bool
+	}{
+		{name: "no processes", goos: "darwin"},
+		{name: "apps stopped or absent", goos: "darwin", output: "1 /sbin/launchd\n100 /Applications/Ollama.app/Contents/MacOS/Ollama\n"},
+		{name: "ChatGPT main", goos: "darwin", output: fmt.Sprintf("%d /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n", otherPID), want: true},
+		{name: "Codex main", goos: "darwin", output: fmt.Sprintf("%d /Applications/Codex.app/Contents/MacOS/Codex\n", otherPID), want: true},
+		{name: "renamed ChatGPT bundle", goos: "darwin", output: fmt.Sprintf("%d /Applications/ChatGPT Preview.app/Contents/MacOS/ChatGPT\n", otherPID), nameMatchExit: "0", want: true},
+		{name: "renamed Codex bundle", goos: "darwin", output: fmt.Sprintf("%d /Applications/Codex Preview.app/Contents/MacOS/Codex\n", otherPID), nameMatchExit: "0", want: true},
+		{name: "Codex installed as ChatGPT", goos: "darwin", output: fmt.Sprintf("%d /Applications/ChatGPT.app/Contents/MacOS/Codex\n", otherPID), nameMatchExit: "0", want: true},
+		{name: "ChatGPT app server", goos: "darwin", output: fmt.Sprintf("%d /Applications/ChatGPT.app/Contents/Resources/codex app-server --analytics-default-enabled\n", otherPID), want: true},
+		{name: "Codex app server", goos: "darwin", output: fmt.Sprintf("%d /Applications/Codex.app/Contents/Resources/codex app-server --analytics-default-enabled\n", otherPID), want: true},
+		{name: "ChatGPT helper only", goos: "darwin", output: "105 /Applications/ChatGPT.app/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper\n"},
+		{name: "Codex helpers only", goos: "darwin", output: "106 /Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper\n107 /Applications/Codex.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler\n"},
+		{name: "current process", goos: "darwin", output: fmt.Sprintf("%d /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n", os.Getpid())},
+		{name: "malformed process list", goos: "darwin", output: "\n108\ninvalid /Applications/Codex.app/Contents/MacOS/Codex\n"},
+		{name: "failed process lookup", goos: "darwin", output: fmt.Sprintf("%d /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n", otherPID), exitCode: "1"},
+		{name: "name match with failed process lookup", goos: "darwin", exitCode: "1", nameMatchExit: "0", want: true},
+		{name: "failed name lookup falls back to process list", goos: "darwin", output: fmt.Sprintf("%d /Applications/ChatGPT.app/Contents/MacOS/ChatGPT\n", otherPID), nameMatchExit: "3", want: true},
+		{name: "Windows stopped", goos: "windows"},
+		{name: "Windows running", goos: "windows", output: fmt.Sprintf("%d\r\n", otherPID), want: true},
+		{name: "Windows current process", goos: "windows", output: fmt.Sprintf("%d\r\n", os.Getpid())},
+		{name: "unsupported platform", goos: "linux", output: fmt.Sprintf("%d /Applications/Codex.app/Contents/MacOS/Codex\n", otherPID)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withCodexAppPlatform(t, tt.goos)
+			command := "ps"
+			if tt.goos == "windows" {
+				command = "powershell.exe"
+			}
+			commands := map[string]string{
+				command: "printf '%s' \"$OLLAMA_TEST_CODEX_APP_PROCESSES\"\nexit \"${OLLAMA_TEST_CODEX_APP_EXIT_CODE:-0}\"\n",
+			}
+			if tt.goos == "darwin" {
+				// Exact names exclude helpers; -a includes the app if it launched Ollama.
+				commands["pgrep"] = "[ \"$*\" = '-a -x ChatGPT|Codex' ] || exit 2\nexit \"${OLLAMA_TEST_CODEX_APP_NAME_EXIT_CODE:-1}\"\n"
+			}
+			stubCodexAppProcessCommands(t, commands)
+			t.Setenv("OLLAMA_TEST_CODEX_APP_PROCESSES", tt.output)
+			t.Setenv("OLLAMA_TEST_CODEX_APP_EXIT_CODE", tt.exitCode)
+			t.Setenv("OLLAMA_TEST_CODEX_APP_NAME_EXIT_CODE", tt.nameMatchExit)
+
+			if got := defaultCodexAppIsRunning(); got != tt.want {
+				t.Fatalf("defaultCodexAppIsRunning() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultCodexAppIsRunningDoesNotCallAppleScript(t *testing.T) {
+	withCodexAppPlatform(t, "darwin")
+	marker := filepath.Join(t.TempDir(), "osascript-called")
+	t.Setenv("OLLAMA_TEST_CODEX_APP_OSASCRIPT_MARKER", marker)
+	stubCodexAppProcessCommands(t, map[string]string{
+		"ps": "exit 0\n",
+		// Simulate slow System Events without contacting the real application.
+		"osascript": "printf called > \"$OLLAMA_TEST_CODEX_APP_OSASCRIPT_MARKER\"\nexec /bin/sleep 1\n",
+	})
+
+	if defaultCodexAppIsRunning() {
+		t.Fatal("reported a running app with no matching processes")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("running-state detection invoked osascript: %v", err)
 	}
 }
 

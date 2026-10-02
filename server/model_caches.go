@@ -3,18 +3,14 @@ package server
 import "context"
 
 type modelCaches struct {
-	// recommendations *modelRecommendationsCache
-	show      *modelShowCache
-	modelList *modelListCache
-	inference *inferenceModelCache
+	recommendations *modelRecommendationsCache
+	show            *modelShowCache
 }
 
 func newModelCaches() *modelCaches {
 	return &modelCaches{
-		// recommendations: newModelRecommendationsCache(),
-		show:      newModelShowCache(),
-		modelList: newModelListCache(),
-		inference: newInferenceModelCache(),
+		recommendations: newModelRecommendationsCache(),
+		show:            newModelShowCache(),
 	}
 }
 
@@ -27,8 +23,5 @@ func (c *modelCaches) Start(ctx context.Context) {
 	// }
 	if c.show != nil {
 		c.show.Start(ctx)
-	}
-	if c.modelList != nil {
-		c.modelList.Start(ctx)
 	}
 }

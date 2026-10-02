@@ -231,6 +231,10 @@ var (
 	GoTemplate = BoolWithDefault("OLLAMA_GO_TEMPLATE")
 	// KvCacheType is the quantization type for the K/V cache.
 	KvCacheType = String("OLLAMA_KV_CACHE_TYPE")
+	// NoHistory disables readline history.
+	NoHistory = true
+	// NoPrune disables pruning of model blobs on startup.
+	NoPrune = Bool("OLLAMA_NOPRUNE")
 	// SchedSpread allows scheduling models across all GPUs.
 	SchedSpread = Bool("OLLAMA_SCHED_SPREAD")
 	// ContextLength sets the default context length
@@ -241,6 +245,8 @@ var (
 	EnableVulkan = BoolWithDefault("OLLAMA_VULKAN")
 	// EnableIntegratedGPU controls whether integrated GPUs may be selected.
 	EnableIntegratedGPU = BoolWithDefault("OLLAMA_IGPU_ENABLE")
+	// NoCloudEnv checks the OLLAMA_NO_CLOUD environment variable.
+	NoCloudEnv = true
 )
 
 func String(s string) func() string {

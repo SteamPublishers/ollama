@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -33,23 +34,27 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 
 	"github.com/ollama/ollama/api"
 	// "github.com/ollama/ollama/cmd/config"
 	"github.com/ollama/ollama/cmd/launch"
+	"github.com/ollama/ollama/create"
 	"github.com/ollama/ollama/discover"
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/internal/modelref"
 	"github.com/ollama/ollama/logutil"
+	"github.com/ollama/ollama/manifest"
+	"github.com/ollama/ollama/mlxrunner"
+	"github.com/ollama/ollama/parser"
 	"github.com/ollama/ollama/progress"
 	"github.com/ollama/ollama/readline"
-	"github.com/ollama/ollama/runner"
 	"github.com/ollama/ollama/server"
 	"github.com/ollama/ollama/types/model"
+	"github.com/ollama/ollama/types/syncmap"
 	"github.com/ollama/ollama/version"
-	xcreate "github.com/ollama/ollama/x/create"
 )
 
 func init() {
@@ -146,8 +151,6 @@ func ensureThinkingSupport(ctx context.Context, client *api.Client, name string)
 	fmt.Fprintf(os.Stderr, "warning: model %q does not support thinking output\n", name)
 }
 
-var errModelfileNotFound = errors.New("specified Modelfile wasn't found")
-
 func getModelfileName(cmd *cobra.Command) (string, error) {
 	filename, _ := cmd.Flags().GetString("file")
 
@@ -179,37 +182,263 @@ func isLocalhost() bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
-func resolveExperimentalLocalModelDir(ref, filename string) string {
+func resolveCreateLocalModelDir(ref, filename string) string {
 	if ref == "" || filepath.IsAbs(ref) || filename == "" {
 		return ref
 	}
 
 	candidate := filepath.Join(filepath.Dir(filename), ref)
-	if xcreate.IsSafetensorsModelDir(candidate) {
+	if create.IsSafetensorsModelDir(candidate) {
 		return candidate
 	}
 
 	return ref
 }
 
-func resolveExperimentalDraftDir(ref, filename string) (string, error) {
+func resolveCreateDraftDir(ref, filename string) (string, error) {
 	if ref == "" {
 		return "", nil
 	}
 	if filepath.IsAbs(ref) {
-		if xcreate.IsSafetensorsModelDir(ref) {
+		if create.IsSafetensorsModelDir(ref) {
 			return ref, nil
 		}
 		return "", fmt.Errorf("draft %s is not a supported safetensors model directory", ref)
 	}
 	if filename != "" {
 		candidate := filepath.Join(filepath.Dir(filename), ref)
-		if xcreate.IsSafetensorsModelDir(candidate) {
+		if create.IsSafetensorsModelDir(candidate) {
 			return candidate, nil
 		}
 	}
 
-	return "", fmt.Errorf("DRAFT model references are not supported with --experimental yet: %s", ref)
+	return "", fmt.Errorf("DRAFT model references must be local safetensors directories for safetensors create: %s", ref)
+}
+
+func readCreateModelfile(cmd *cobra.Command) (*parser.Modelfile, string, error) {
+	var reader io.Reader
+	filename, err := getModelfileName(cmd)
+	if errors.Is(err, os.ErrNotExist) || filename == "" {
+		reader = strings.NewReader("FROM .\n")
+	} else if err != nil {
+		return nil, "", err
+	} else {
+		f, err := os.Open(filename)
+		if err != nil {
+			return nil, "", err
+		}
+		defer f.Close()
+		reader = f
+	}
+
+	modelfile, err := parser.ParseFile(reader)
+	if err != nil {
+		return nil, "", err
+	}
+	return modelfile, filename, nil
+}
+
+func safetensorsCreateOptions(modelfile *parser.Modelfile, filename, modelName string) (createOptions, bool, error) {
+	modelDir, mfConfig, err := configFromModelfile(modelfile)
+	if err != nil {
+		return createOptions{}, false, err
+	}
+
+	modelDir = resolveCreateLocalModelDir(modelDir, filename)
+	isSafetensors := create.IsSafetensorsModelDir(modelDir)
+	isBaseModelWithDraft := mfConfig.Draft != "" && !isSafetensors && create.IsSafetensorsLLMModel(modelDir)
+	if !isSafetensors && !isBaseModelWithDraft {
+		return createOptions{}, false, nil
+	}
+
+	if mfConfig.Draft != "" {
+		draftDir, err := resolveCreateDraftDir(mfConfig.Draft, filename)
+		if err != nil {
+			if isSafetensors {
+				return createOptions{}, false, err
+			}
+			// Existing safetensors models may still use a GGUF DRAFT layer;
+			// leave that combination on the standard create path.
+			return createOptions{}, false, nil
+		}
+		mfConfig.Draft = draftDir
+	}
+
+	var modelCount, draftCount int
+	for _, command := range modelfile.Commands {
+		switch command.Name {
+		case "model":
+			modelCount++
+		case "draft":
+			draftCount++
+		}
+	}
+	if modelCount != 1 {
+		return createOptions{}, false, errors.New("safetensors imports require exactly one FROM source")
+	}
+	if draftCount > 1 {
+		return createOptions{}, false, errors.New("safetensors imports support at most one DRAFT source")
+	}
+
+	return createOptions{
+		ModelName: modelName,
+		ModelDir:  modelDir,
+		Modelfile: mfConfig,
+	}, true, nil
+}
+
+var (
+	errAdaptersUnsupported = errors.New("LoRA adapters are no longer supported")
+	errForceLocalOnly      = errors.New("--force is only supported for local MLX safetensors imports")
+	errTypicalPDeprecated  = errors.New("typical_p is deprecated and cannot be set as a model parameter; pass it as a request option instead")
+)
+
+// createSafetensorsModel imports in-process when the server is local and
+// otherwise uploads the source files for the server to import.
+func createSafetensorsModel(cmd *cobra.Command, args []string, opts createOptions, p *progress.Progress) error {
+	return createModel(cmd.Context(), opts, p)
+}
+
+func CreateHandler(cmd *cobra.Command, args []string) error {
+	p := progress.NewProgress(os.Stderr)
+	defer p.Stop()
+
+	// Validate model name early to fail fast
+	modelName := args[0]
+	name := model.ParseName(modelName)
+	if !name.IsValid() {
+		return fmt.Errorf("invalid model name: %s", modelName)
+	}
+
+	draftQuantize, _ := cmd.Flags().GetString("draft-quantize")
+	quantize, _ := cmd.Flags().GetString("quantize")
+	force, _ := cmd.Flags().GetBool("force")
+	modelfile, filename, err := readCreateModelfile(cmd)
+	if err != nil {
+		return err
+	}
+	if slices.ContainsFunc(modelfile.Commands, func(c parser.Command) bool { return c.Name == "adapter" }) {
+		return errAdaptersUnsupported
+	}
+	if slices.ContainsFunc(modelfile.Commands, func(c parser.Command) bool { return c.Name == "typical_p" }) {
+		return errTypicalPDeprecated
+	}
+
+	opts, isSafetensorsCreate, err := safetensorsCreateOptions(modelfile, filename, modelName)
+	if err != nil {
+		return err
+	}
+	if isSafetensorsCreate {
+		opts.Quantize = quantize
+		opts.DraftQuantize = draftQuantize
+		opts.Force = force
+		return createSafetensorsModel(cmd, args, opts, p)
+	}
+	if quantize != "" {
+		return errors.New("create-time quantization is only supported for safetensors imports; quantize GGUF models before importing")
+	}
+	if force {
+		return errForceLocalOnly
+	}
+
+	// Standard Modelfile + API path
+	status := "gathering model components"
+	spinner := progress.NewSpinner(status)
+	p.Add(status, spinner)
+
+	req, err := modelfile.CreateRequest(filepath.Dir(filename))
+	if err != nil {
+		return err
+	}
+	spinner.Stop()
+
+	req.Model = modelName
+	if draftQuantize != "" {
+		if len(req.DraftFiles) == 0 {
+			return errors.New("--draft-quantize requires a DRAFT model")
+		}
+		return errors.New("draft quantization during create is only supported for safetensors imports; quantize GGUF draft models before importing")
+	}
+	if err := checkServerHeartbeat(cmd, args); err != nil {
+		return err
+	}
+	client, err := api.ClientFromEnvironment()
+	if err != nil {
+		return err
+	}
+	// A FROM-only create has nothing to transfer, so skip the store probe.
+	local := len(req.Files)+len(req.DraftFiles) > 0 && sharedBlobStore(cmd.Context(), client)
+
+	var g errgroup.Group
+	g.SetLimit(max(runtime.GOMAXPROCS(0)-1, 1))
+
+	files := syncmap.NewSyncMap[string, string]()
+	fileNames := createRequestFileNames(req.Files)
+	for f, digest := range req.Files {
+		g.Go(func() error {
+			if _, err := createBlob(cmd, client, f, digest, p, local); err != nil {
+				return err
+			}
+
+			files.Store(fileNames[f], digest)
+			return nil
+		})
+	}
+
+	draftFiles := syncmap.NewSyncMap[string, string]()
+	draftFileNames := createRequestFileNames(req.DraftFiles)
+	for f, digest := range req.DraftFiles {
+		g.Go(func() error {
+			if _, err := createBlob(cmd, client, f, digest, p, local); err != nil {
+				return err
+			}
+
+			draftFiles.Store(draftFileNames[f], digest)
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	req.Files = files.Items()
+	req.DraftFiles = draftFiles.Items()
+
+	bars := make(map[string]*progress.Bar)
+	fn := func(resp api.ProgressResponse) error {
+		if resp.Digest != "" {
+			bar, ok := bars[resp.Digest]
+			if !ok {
+				msg := resp.Status
+				if msg == "" {
+					msg = fmt.Sprintf("pulling %s...", resp.Digest[7:19])
+				}
+				bar = progress.NewBar(msg, resp.Total, resp.Completed)
+				bars[resp.Digest] = bar
+				p.Add(resp.Digest, bar)
+			}
+
+			bar.Set(resp.Completed)
+		} else if status != resp.Status {
+			spinner.Stop()
+
+			status = resp.Status
+			spinner = progress.NewSpinner(status)
+			p.Add(status, spinner)
+		}
+
+		return nil
+	}
+
+	if err := client.Create(cmd.Context(), req, fn); err != nil {
+		if strings.Contains(err.Error(), "path or Modelfile are required") {
+			return fmt.Errorf("the ollama server must be updated to use `ollama create` with this client")
+		}
+		return err
+	}
+
+	return nil
 }
 
 func createRequestFileNames(files map[string]string) map[string]string {
@@ -271,7 +500,42 @@ func commonFileRoot(files map[string]string) (string, bool) {
 	return root, root != ""
 }
 
-func createBlob(cmd *cobra.Command, client *api.Client, path string, digest string, p *progress.Progress) (string, error) {
+// sharedBlobStore reports whether the server reads blobs from this process's
+// models directory, in which case create can write blobs there directly
+// instead of streaming them over HTTP. A throwaway blob is written and the
+// server asked whether it can see it, so a server with a different
+// OLLAMA_MODELS (a systemd-managed install, for example) falls back to upload.
+func sharedBlobStore(ctx context.Context, client *api.Client) bool {
+	if !isLocalhost() {
+		return false
+	}
+	probe := make([]byte, 32)
+	if _, err := rand.Read(probe); err != nil {
+		return false
+	}
+	layer, err := manifest.NewLayer(bytes.NewReader(probe), "")
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if blob, err := manifest.BlobsPath(layer.Digest); err == nil {
+			os.Remove(blob)
+		}
+	}()
+	exists, err := client.HeadBlob(ctx, layer.Digest)
+	return err == nil && exists
+}
+
+// createBlob makes the file at path available to the server under digest,
+// writing it straight into the shared blob store when local is set and
+// uploading it otherwise. Blobs the server already has are skipped.
+func createBlob(cmd *cobra.Command, client *api.Client, path string, digest string, p *progress.Progress, local bool) (string, error) {
+	if exists, err := client.HeadBlob(cmd.Context(), digest); err != nil {
+		return "", err
+	} else if exists {
+		return digest, nil
+	}
+
 	realPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", err
@@ -313,7 +577,18 @@ func createBlob(cmd *cobra.Command, client *api.Client, path string, digest stri
 		}
 	}()
 
-	if err := client.CreateBlob(cmd.Context(), digest, io.TeeReader(bin, &pw)); err != nil {
+	reader := io.TeeReader(bin, &pw)
+	if local {
+		layer, err := manifest.NewLayer(reader, "")
+		if err != nil {
+			return "", err
+		}
+		if layer.Digest != digest {
+			return "", fmt.Errorf("%s changed during create: expected digest %s, got %s", path, digest, layer.Digest)
+		}
+		return digest, nil
+	}
+	if err := client.CreateBlob(cmd.Context(), digest, reader); err != nil {
 		return "", err
 	}
 	return digest, nil
@@ -548,10 +823,8 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 			opts.Think = &api.ThinkValue{Value: true}
 		case "false":
 			opts.Think = &api.ThinkValue{Value: false}
-		case "high", "medium", "low", "max":
-			opts.Think = &api.ThinkValue{Value: thinkStr}
 		default:
-			return fmt.Errorf("invalid value for --think: %q (must be true, false, high, medium, low, or max)", thinkStr)
+			opts.Think = &api.ThinkValue{Value: thinkStr}
 		}
 	} else {
 		opts.Think = nil
@@ -987,6 +1260,16 @@ func showInfo(resp *api.ShowResponse, verbose bool, w io.Writer) error {
 		tableRender("Capabilities", func() (rows [][]string) {
 			for _, capability := range resp.Capabilities {
 				rows = append(rows, []string{"", capability.String()})
+				if capability == model.CapabilityThinking && resp.Thinking.Valid() {
+					values := make([]string, len(resp.Thinking.Values))
+					for i, value := range resp.Thinking.Values {
+						values[i] = fmt.Sprint(value)
+					}
+					rows = append(rows,
+						[]string{"", "    levels", strings.Join(values, ", ")},
+						[]string{"", "    default", fmt.Sprint(resp.Thinking.Default)},
+					)
+				}
 			}
 			return
 		})
@@ -1746,6 +2029,20 @@ func NewCLI() *cobra.Command {
 	rootCmd.Flags().Bool("verbose", false, "Show timings for response")
 	rootCmd.Flags().Bool("nowordwrap", false, "Don't wrap words to the next line automatically")
 
+	createCmd := &cobra.Command{
+		Use:   "create MODEL",
+		Short: "Create a model",
+		Args:  cobra.ExactArgs(1),
+		RunE:  CreateHandler,
+	}
+
+	createCmd.Flags().StringP("file", "f", "", "Name of the Modelfile (default \"Modelfile\")")
+	createCmd.Flags().StringP("quantize", "q", "", "Quantize safetensors model to this level (e.g. nvfp4)")
+	createCmd.Flags().String("draft-quantize", "", "Quantize safetensors draft model to this level")
+	createCmd.Flags().Bool("force", false, "Continue local creation when MLX validation fails")
+	createCmd.Flags().Bool("experimental", false, "Deprecated no-op")
+	createCmd.Flags().MarkHidden("experimental")
+
 	showCmd := &cobra.Command{
 		Use:     "show MODEL",
 		Short:   "Show information for a model",
@@ -1840,12 +2137,12 @@ func NewCLI() *cobra.Command {
 		Use:    "runner",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runner.Execute(os.Args[1:])
+			return mlxrunner.Execute(os.Args[2:])
 		},
 		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
 	}
 	runnerCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		_ = runner.Execute(args[1:])
+		_ = mlxrunner.Execute([]string{"--help"})
 	})
 
 	var gpuDiscoverLibDirs []string
